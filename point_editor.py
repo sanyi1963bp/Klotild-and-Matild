@@ -36,42 +36,63 @@ from typing import List, Optional, Set, Tuple
 
 import numpy as np
 
-from PyQt6.QtCore import Qt, QRectF, QPoint, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize, pyqtSignal
 from PyQt6.QtGui import (
     QAction, QActionGroup, QBrush, QColor, QFont,
-    QImage, QPainter, QPen, QPixmap, QPolygonF,
+    QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
 )
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QMenu, QPushButton,
     QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
-# ── Vizuális konstansok ──────────────────────────────────────────────────────
-_R_NORMAL = 6            # Normál pont sugara (px)
-_R_ACTIVE = 10           # Aktív pont sugara (px)
-_R_MULTI  = 8            # Multi-kijelölt pont sugara (px)
-_HIT_R    = 14           # Kattintási érzékenység (px)
+# ── Konfiguráció betöltése ────────────────────────────────────────────────────
+# Az archmorph_config.toml fájlból olvassa az értékeket (ha létezik).
+# Ha nem létezik, vagy hibás, az alábbi alapértelmezett értékek maradnak.
+try:
+    from archmorph_config_loader import cfg, cfg_rgba
+except ImportError:
+    # Ha a config_loader nincs meg, semleges fallback
+    def cfg(key, default):      return default        # type: ignore[misc]
+    def cfg_rgba(key, default): return default        # type: ignore[misc]
 
-_C_NORMAL = QColor("#ff8a3d")           # narancs  – normál pont
-_C_ACTIVE = QColor("#ff3333")           # piros    – aktív pont
-_C_MULTI  = QColor("#44aaff")           # kék      – multi-kijelölt pont
-_C_FILL_N = QColor(255, 138,  61,  70)  # narancs fill (áttetsző)
-_C_FILL_A = QColor(255,  51,  51, 150)  # piros fill (aktív)
-_C_FILL_M = QColor( 68, 170, 255,  90)  # kék fill (multi-kijelölt)
-_C_TEXT   = QColor("#ffffff")
-_C_TEXT_A = QColor("#ffcccc")
-_C_BG     = QColor("#1a1f24")
-_C_BORDER = QColor("#343b45")
-_C_PLACEHOLDER = QColor("#4a5260")
+# ── Vizuális konstansok (archmorph_config.toml → [ui.sizes] és [ui.colors]) ──
+
+_R_NORMAL = cfg("ui.sizes.point_radius_normal", 6)    # Normál pont sugara (px)
+_R_ACTIVE = cfg("ui.sizes.point_radius_active", 10)   # Aktív pont sugara (px)
+_R_MULTI  = cfg("ui.sizes.point_radius_multi",  8)    # Multi-kijelölt pont sugara (px)
+_HIT_R    = cfg("ui.sizes.point_hit_radius",    14)   # Kattintási érzékenység (px)
+
+_C_NORMAL = QColor(cfg("ui.colors.points.normal",      "#ff8a3d"))
+_C_ACTIVE = QColor(cfg("ui.colors.points.active",      "#ff3333"))
+_C_MULTI  = QColor(cfg("ui.colors.points.multi",       "#44aaff"))
+_C_TEXT   = QColor(cfg("ui.colors.points.text",        "#ffffff"))
+_C_TEXT_A = QColor(cfg("ui.colors.points.text_active", "#ffcccc"))
+_C_BG     = QColor(cfg("ui.colors.canvas.background",  "#1a1f24"))
+_C_BORDER = QColor(cfg("ui.colors.canvas.border",      "#343b45"))
+_C_PLACEHOLDER = QColor(cfg("ui.colors.canvas.placeholder", "#4a5260"))
+
+# Pontok belső kitöltése (RGBA)
+_C_FILL_N = QColor(*cfg_rgba("ui.colors.points.fill.normal_rgba", (255, 138,  61,  70)))
+_C_FILL_A = QColor(*cfg_rgba("ui.colors.points.fill.active_rgba", (255,  51,  51, 150)))
+_C_FILL_M = QColor(*cfg_rgba("ui.colors.points.fill.multi_rgba",  ( 68, 170, 255,  90)))
 
 # Gumiszalag stílus
-_C_RBAND_SEL = QColor("#88bbff")        # kék keret – normál kijelölés
-_C_RBAND_ROI = QColor("#ffcc44")        # sárga keret – Ctrl-ROI
+_C_RBAND_SEL = QColor(cfg("ui.colors.rband.selection", "#88bbff"))
+_C_RBAND_ROI = QColor(cfg("ui.colors.rband.roi",       "#ffcc44"))
 
 # Sokszög-ROI stílus
-_C_POLY_DRAW = QColor("#FFB300")        # borostyán – rajzolás alatt
-_C_POLY_DONE = QColor("#FF6F00")        # mélyebb narancs – lezárt, menü aktív
-_C_POLY_FILL = QColor(255, 179, 0, 35)  # áttetsző kitöltés
+_C_POLY_DRAW = QColor(cfg("ui.colors.polygon.draw", "#FFB300"))
+_C_POLY_DONE = QColor(cfg("ui.colors.polygon.done", "#FF6F00"))
+_C_POLY_FILL = QColor(*cfg_rgba("ui.colors.polygon.fill_rgba", (255, 179, 0, 35)))
+
+# Tartós téglalap-ROI stílus
+_C_ROI_BORDER  = QColor(cfg("ui.colors.roi.border", "#ff9900"))
+_C_ROI_HANDLE  = QColor(cfg("ui.colors.roi.handle", "#ffffff"))
+_C_ROI_FILL    = QColor(*cfg_rgba("ui.colors.roi.fill_rgba",    (255, 153,   0,  22)))
+_C_ROI_OUTSIDE = QColor(*cfg_rgba("ui.colors.roi.outside_rgba", (  0,   0,   0,  90)))
+_ROI_HANDLE_R  = cfg("ui.sizes.roi_handle_radius", 6)    # fogópontok sugara (px)
+_ROI_MIN_SIZE  = cfg("ui.sizes.roi_min_size",       10)   # minimum ROI méret (px)
 
 
 # ── Segédfüggvény (cv2 nélkül is működik) ───────────────────────────────────
@@ -116,10 +137,14 @@ class PointEditorCanvas(QWidget):
     points_delete_multi_requested = pyqtSignal()
     point_selected              = pyqtSignal(int)
     selection_changed           = pyqtSignal(list)
-    roi_ready                   = pyqtSignal(list)  # sokszög widget-koordinátákban
+    roi_ready                   = pyqtSignal(list)   # sokszög widget-koordinátákban
+    roi_rect_changed            = pyqtSignal(object) # QRectF képkoordban vagy None
     zoom_sync_requested         = pyqtSignal(float, float, float)
     middle_clicked              = pyqtSignal()
     undo_requested              = pyqtSignal()
+    image_drop_requested        = pyqtSignal(str)    # kép drag & drop
+
+    _IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
     _ZOOM_MIN  = 0.5
     _ZOOM_MAX  = 20.0
@@ -163,6 +188,17 @@ class PointEditorCanvas(QWidget):
         self._cursor_pos:  Tuple[float, float]       = (0.0, 0.0)  # preview vonal
         self._display_poly: List[Tuple[float, float]]= []   # lezárt, menü alatt mutatva
 
+        # Tartós téglalap-ROI (képkoordban tárolva)
+        self._roi_img:       Optional[QRectF]  = None
+        self._roi_mode:      str               = ""    # "" | "move" | handle-neve
+        self._roi_drag_wx:   float             = 0.0
+        self._roi_drag_wy:   float             = 0.0
+        self._roi_img_start: Optional[QRectF]  = None
+
+        # Drag & drop
+        self._drag_hover: bool = False
+        self.setAcceptDrops(True)
+
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
@@ -195,6 +231,79 @@ class PointEditorCanvas(QWidget):
         """Multi-kijelölés szinkronizálása a párcanvasról."""
         self._selected_set = set(indices)
         self.update()
+
+    # ── Tartós téglalap-ROI – publikus API ──────────────────────────────────
+
+    def set_roi_from_image(self, rect: Optional[QRectF]) -> None:
+        """ROI beállítása képkoordináták alapján (a másik canvasról szinkronizálva)."""
+        self._roi_img = QRectF(rect) if rect is not None else None
+        self.update()
+
+    def get_roi_image(self) -> Optional[QRectF]:
+        """Visszaadja a ROI-t képkoordinátában (None ha nincs)."""
+        return QRectF(self._roi_img) if self._roi_img is not None else None
+
+    def clear_roi(self) -> None:
+        self._roi_img   = None
+        self._roi_mode  = ""
+        self.update()
+        self.roi_rect_changed.emit(None)
+
+    # ── Tartós téglalap-ROI – belső segédek ─────────────────────────────────
+
+    def _roi_widget_rect(self) -> Optional[QRectF]:
+        """ROI képkoordból widget-koordinátára."""
+        if self._roi_img is None:
+            return None
+        tl = self._i2w(self._roi_img.left(),  self._roi_img.top())
+        br = self._i2w(self._roi_img.right(), self._roi_img.bottom())
+        if tl is None or br is None:
+            return None
+        return QRectF(QPointF(*tl), QPointF(*br)).normalized()
+
+    _HANDLE_NAMES = ("tl", "tc", "tr", "ml", "mr", "bl", "bc", "br")
+
+    def _roi_handles_w(self) -> dict:
+        """8 fogópont pozíciója widget-koordinátában → {name: (x, y)}."""
+        r = self._roi_widget_rect()
+        if r is None:
+            return {}
+        cx, cy = r.center().x(), r.center().y()
+        return {
+            "tl": (r.left(),   r.top()),
+            "tc": (cx,          r.top()),
+            "tr": (r.right(),  r.top()),
+            "ml": (r.left(),   cy),
+            "mr": (r.right(),  cy),
+            "bl": (r.left(),   r.bottom()),
+            "bc": (cx,          r.bottom()),
+            "br": (r.right(),  r.bottom()),
+        }
+
+    def _hit_roi_handle(self, wx: float, wy: float) -> str:
+        """Melyik fogópontra kattintott? Üres string ha egyik sem."""
+        for name, (hx, hy) in self._roi_handles_w().items():
+            if math.hypot(wx - hx, wy - hy) <= _ROI_HANDLE_R + 4:
+                return name
+        return ""
+
+    def _hit_roi_body(self, wx: float, wy: float) -> bool:
+        """A ROI belső területén van az egér (fogóponton kívül)?"""
+        r = self._roi_widget_rect()
+        if r is None:
+            return False
+        return r.contains(wx, wy) and self._hit_roi_handle(wx, wy) == ""
+
+    _HANDLE_CURSORS = {
+        "tl": Qt.CursorShape.SizeFDiagCursor,
+        "br": Qt.CursorShape.SizeFDiagCursor,
+        "tr": Qt.CursorShape.SizeBDiagCursor,
+        "bl": Qt.CursorShape.SizeBDiagCursor,
+        "tc": Qt.CursorShape.SizeVerCursor,
+        "bc": Qt.CursorShape.SizeVerCursor,
+        "ml": Qt.CursorShape.SizeHorCursor,
+        "mr": Qt.CursorShape.SizeHorCursor,
+    }
 
     # ── Koordináta-transzformáció ────────────────────────────────────────────
 
@@ -274,6 +383,22 @@ class PointEditorCanvas(QWidget):
 
         # ── Bal gomb ─────────────────────────────────────────────────────────
         if btn == Qt.MouseButton.LeftButton:
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            # ── ROI fogópont / mozgatás ── (Ctrl nélkül, ROI létezik) ────────
+            if not ctrl and self._roi_img is not None:
+                handle = self._hit_roi_handle(wx, wy)
+                if handle:
+                    self._roi_mode      = handle
+                    self._roi_drag_wx   = wx
+                    self._roi_drag_wy   = wy
+                    self._roi_img_start = QRectF(self._roi_img)
+                    return
+                if self._hit_roi_body(wx, wy):
+                    self._roi_mode      = "move"
+                    self._roi_drag_wx   = wx
+                    self._roi_drag_wy   = wy
+                    self._roi_img_start = QRectF(self._roi_img)
+                    return
             idx = self._hit_test(wx, wy)
             if idx >= 0:
                 # Kattintás meglévő ponton → húzás előkészítése
@@ -358,12 +483,55 @@ class PointEditorCanvas(QWidget):
         if self._poly_mode:
             self.update()
 
+        # ── ROI drag: mozgatás vagy átméretezés ──────────────────────────────
+        if self._roi_mode and (event.buttons() & Qt.MouseButton.LeftButton):
+            start_ic = self._w2i(self._roi_drag_wx, self._roi_drag_wy)
+            curr_ic  = self._w2i(wx, wy)
+            # Ha az egér a kép területén kívülre ment, klampoljuk a képre
+            rect = self._display_rect()
+            if rect is None or self._roi_img_start is None:
+                return
+            if curr_ic is None:
+                cwx = max(rect.left(), min(wx, rect.right()))
+                cwy = max(rect.top(),  min(wy, rect.bottom()))
+                curr_ic = self._w2i(cwx, cwy) or (0.0, 0.0)
+            if start_ic is None:
+                return
+            dx = curr_ic[0] - start_ic[0]
+            dy = curr_ic[1] - start_ic[1]
+            r  = QRectF(self._roi_img_start)
+            m  = self._roi_mode
+            if m == "move":
+                r.translate(dx, dy)
+            else:
+                if "l" in m: r.setLeft(r.left()   + dx)
+                if "r" in m: r.setRight(r.right() + dx)
+                if "t" in m: r.setTop(r.top()     + dy)
+                if "b" in m: r.setBottom(r.bottom() + dy)
+            # Klampoljuk a kép határaira
+            if self._img_size:
+                iw, ih = self._img_size
+                r = r.normalized()
+                r.setLeft(max(0.0, r.left()))
+                r.setTop(max(0.0,  r.top()))
+                r.setRight(min(float(iw),  r.right()))
+                r.setBottom(min(float(ih), r.bottom()))
+            self._roi_img = r.normalized()
+            self.update()
+            return
+
         # ── Hover kurzor visszajelzés ─────────────────────────────────────────
         if not self._rpan_active and not (event.buttons() & Qt.MouseButton.LeftButton):
-            hit  = self._hit_test(wx, wy)
-            rect = self._display_rect()
+            hit    = self._hit_test(wx, wy)
+            rect   = self._display_rect()
+            handle = self._hit_roi_handle(wx, wy)
             if self._poly_mode:
                 self.setCursor(Qt.CursorShape.CrossCursor)
+            elif handle:
+                self.setCursor(self._HANDLE_CURSORS.get(
+                    handle, Qt.CursorShape.ArrowCursor))
+            elif self._hit_roi_body(wx, wy):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
             elif hit >= 0:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
             elif rect is not None and rect.contains(wx, wy):
@@ -406,6 +574,14 @@ class PointEditorCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._roi_mode:
+            self._roi_mode      = ""
+            self._roi_img_start = None
+            self.update()
+            self.roi_rect_changed.emit(
+                QRectF(self._roi_img) if self._roi_img else None)
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             if self._rband_active:
                 # Gumiszalag lezárása (húzás volt)
@@ -460,16 +636,17 @@ class PointEditorCanvas(QWidget):
                 inside.append(i)
 
         if self._rband_ctrl:
-            # Ctrl-keret: 4 sarkos sokszöget küldünk (widget-koordinátában)
-            poly = [
-                (rx0, ry0), (rx1, ry0),
-                (rx1, ry1), (rx0, ry1),
-            ]
-            self._display_poly = poly
-            self._poly_mode    = False
-            self._poly_pts     = []
-            self.update()
-            self.roi_ready.emit(poly)
+            # Ctrl-keret: TARTÓS téglalap-ROI létrehozása képkoordinátában
+            tl = self._w2i(rx0, ry0)
+            br = self._w2i(rx1, ry1)
+            if tl is not None and br is not None:
+                candidate = QRectF(QPointF(*tl), QPointF(*br)).normalized()
+                # Minimum méret ellenőrzés: legalább 10×10 képpont kell,
+                # különben apró Ctrl+húzás érvénytelen ROI-t hozna létre.
+                if candidate.width() >= _ROI_MIN_SIZE and candidate.height() >= _ROI_MIN_SIZE:
+                    self._roi_img = candidate
+                    self.update()
+                    self.roi_rect_changed.emit(QRectF(self._roi_img))
         else:
             # Normál keret: multi-kijelölés
             self._selected_set = set(inside)
@@ -596,6 +773,36 @@ class PointEditorCanvas(QWidget):
         else:
             super().keyPressEvent(event)
 
+    # ── Drag & Drop ──────────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(self._IMG_EXTS):
+                    self._drag_hover = True
+                    self.update()
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._drag_hover = False
+        self.update()
+
+    def dropEvent(self, event) -> None:
+        self._drag_hover = False
+        self.update()
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(self._IMG_EXTS):
+                self.image_drop_requested.emit(path)
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
     def _reset_zoom(self) -> None:
         if self._img_size is None:
             return
@@ -667,6 +874,37 @@ class PointEditorCanvas(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
             painter.drawPixmap(int(rect.left()), int(rect.top()), scaled)
+
+        # ── Tartós téglalap-ROI overlay ──────────────────────────────────────
+        roi_w = self._roi_widget_rect()
+        if roi_w is not None and rect is not None:
+            # Sötétítés a ROI-n kívüli területen
+            outside = QPainterPath()
+            outside.addRect(QRectF(rect))
+            inside = QPainterPath()
+            inside.addRect(roi_w)
+            shadow = outside.subtracted(inside)
+            painter.setBrush(QBrush(_C_ROI_OUTSIDE))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPath(shadow)
+            # ROI keret + belső fill
+            painter.setPen(QPen(_C_ROI_BORDER, 2))
+            painter.setBrush(QBrush(_C_ROI_FILL))
+            painter.drawRect(roi_w)
+            # 8 fogópont
+            painter.setPen(QPen(_C_ROI_BORDER, 1.5))
+            painter.setBrush(QBrush(_C_ROI_HANDLE))
+            for hx, hy in self._roi_handles_w().values():
+                r = _ROI_HANDLE_R
+                painter.drawEllipse(int(hx) - r, int(hy) - r, r * 2, r * 2)
+            # Méret-felirat
+            font_roi = QFont()
+            font_roi.setPointSize(9)
+            painter.setFont(font_roi)
+            painter.setPen(QPen(_C_ROI_BORDER, 1))
+            lbl = (f"ROI  {int(self._roi_img.width())} × "
+                   f"{int(self._roi_img.height())} px")
+            painter.drawText(int(roi_w.left()) + 4, int(roi_w.top()) - 5, lbl)
 
         # Pontok
         font = QFont()
@@ -764,6 +1002,22 @@ class PointEditorCanvas(QWidget):
             # Lezárt sokszög: menü megjelenéséig látható
             _draw_poly(self._display_poly, _C_POLY_DONE, closed=True)
 
+        # ── Drag & Drop hover kiemelés ───────────────────────────────────────
+        if self._drag_hover:
+            c = QColor("#44aaff")
+            painter.setPen(QPen(c, 3))
+            painter.setBrush(QBrush(QColor(68, 170, 255, 25)))
+            painter.drawRect(self.rect().adjusted(2, 2, -3, -3))
+            font3 = QFont()
+            font3.setPointSize(13)
+            font3.setBold(True)
+            painter.setFont(font3)
+            painter.setPen(QPen(c, 1))
+            painter.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter,
+                f"Ejtsd ide!\n({self.title})"
+            )
+
 
 # ────────────────────────────────────────────────────────────────────────────
 #  PointEditorWidget
@@ -798,9 +1052,14 @@ class PointEditorWidget(QWidget):
     roi_search_requested (signal) – (x1,y1,x2,y2,side) ROI keresés kérve
     """
 
-    points_changed       = pyqtSignal()
-    # (img_polygon, side, delete_in_roi, backend)
-    roi_search_requested = pyqtSignal(list, str, bool, str)
+    points_changed           = pyqtSignal()
+    # (img_polygon, side, delete_in_roi, backend)  – sokszög-ROI keresés
+    roi_search_requested     = pyqtSignal(list, str, bool, str)
+    # (roi_a_QRectF, roi_b_QRectF, delete_in_roi, backend) – kétoldali ROI keresés
+    dual_roi_search_requested = pyqtSignal(object, object, bool, str)
+    # kép drag & drop jelzések a főablaknak
+    image_a_drop_requested   = pyqtSignal(str)
+    image_b_drop_requested   = pyqtSignal(str)
 
     _UNDO_LIMIT = 50
 
@@ -849,11 +1108,36 @@ class PointEditorWidget(QWidget):
         )
         self.btn_del.clicked.connect(self._delete_selection)
 
+        self.btn_roi_search = QPushButton("🔍  ROI keresés")
+        self.btn_roi_search.setEnabled(False)
+        self.btn_roi_search.setFixedHeight(28)
+        self.btn_roi_search.setToolTip(
+            "Pontkeresés és párosítás csak a megjelölt ROI területeken belül\n"
+            "(mindkét képen kell aktív ROI)")
+        self.btn_roi_search.setStyleSheet(
+            "QPushButton{background:#1a4a2e;color:#eee;padding:0 10px;"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#246038;}"
+            "QPushButton:disabled{background:#2e2e2e;color:#555;}"
+        )
+        self.btn_roi_search.clicked.connect(self._on_dual_roi_search)
+
+        self.btn_roi_clear = QPushButton("⬜  ROI törlése")
+        self.btn_roi_clear.setEnabled(False)
+        self.btn_roi_clear.setFixedHeight(28)
+        self.btn_roi_clear.setToolTip("Mindkét canvas ROI-jának törlése")
+        self.btn_roi_clear.setStyleSheet(
+            "QPushButton{background:#2e2e2e;color:#aaa;padding:0 10px;"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#3a3a3a;}"
+            "QPushButton:disabled{background:#2e2e2e;color:#555;}"
+        )
+        self.btn_roi_clear.clicked.connect(self._clear_rois)
+
         self.lbl_hint = QLabel(
             "2× klikk: pont  |  Húzás: kijelölés  |  "
-            "Ctrl+klikk: sokszög-ROI  |  Ctrl+húzás: téglalap-ROI  |  "
-            "Enter: ROI lezár  |  Esc: mégse  |  "
-            "Delete: törlés  |  Ctrl+Görgetés: pontváltás  |  Görgetés: zoom"
+            "Ctrl+húzás: ROI keret  |  ROI-n: húzás=mozgat, sarok=átméretez  |  "
+            "Ctrl+klikk: sokszög-ROI  |  Delete: törlés  |  Görgetés: zoom"
         )
         self.lbl_hint.setStyleSheet("color:#666;font-size:11px;")
 
@@ -861,6 +1145,9 @@ class PointEditorWidget(QWidget):
         self.lbl_count.setStyleSheet("color:#aaa;font-size:12px;")
 
         bar.addWidget(self.btn_del)
+        bar.addSpacing(4)
+        bar.addWidget(self.btn_roi_search)
+        bar.addWidget(self.btn_roi_clear)
         bar.addSpacing(8)
         bar.addWidget(self.lbl_hint)
         bar.addStretch()
@@ -898,6 +1185,12 @@ class PointEditorWidget(QWidget):
             lambda poly: self._show_roi_menu(poly, "A"))
         self.canvas_b.roi_ready.connect(
             lambda poly: self._show_roi_menu(poly, "B"))
+        # Tartós ROI szinkronizálás
+        self.canvas_a.roi_rect_changed.connect(self._on_roi_a_changed)
+        self.canvas_b.roi_rect_changed.connect(self._on_roi_b_changed)
+        # Kép drag & drop → tovább a főablaknak
+        self.canvas_a.image_drop_requested.connect(self.image_a_drop_requested)
+        self.canvas_b.image_drop_requested.connect(self.image_b_drop_requested)
         # Zoom szinkron
         self.canvas_a.zoom_sync_requested.connect(self.canvas_b.set_zoom_view)
         self.canvas_b.zoom_sync_requested.connect(self.canvas_a.set_zoom_view)
@@ -981,6 +1274,90 @@ class PointEditorWidget(QWidget):
         self._sync()
         self.points_changed.emit()
         return True
+
+    # ── Tartós téglalap-ROI kezelés ──────────────────────────────────────────
+
+    def _on_roi_a_changed(self, roi_img) -> None:
+        """A kép ROI-ja változott → arányos ROI megjelenítése B képen."""
+        self._update_roi_buttons()
+        if roi_img is None:
+            return
+        img_a = self.project.image_a
+        img_b = self.project.image_b
+        if img_a is None or img_b is None:
+            return
+        ha, wa = img_a.shape[:2]
+        hb, wb = img_b.shape[:2]
+        # Arányos átméretezés A → B képkoord-rendszerbe
+        ax = roi_img.left()  / wa;  ay = roi_img.top()    / ha
+        aw = roi_img.width() / wa;  ah = roi_img.height() / ha
+        b_rect = QRectF(ax * wb, ay * hb, aw * wb, ah * hb)
+        # Canvas B szinkronizálása (szignál kikapcsolva körkörös hívás ellen)
+        self.canvas_b.roi_rect_changed.disconnect(self._on_roi_b_changed)
+        self.canvas_b.set_roi_from_image(b_rect)
+        self.canvas_b.roi_rect_changed.connect(self._on_roi_b_changed)
+        self._update_roi_buttons()
+
+    def _on_roi_b_changed(self, roi_img) -> None:
+        """B kép ROI-ja változott (felhasználó módosította)."""
+        self._update_roi_buttons()
+
+    def _update_roi_buttons(self) -> None:
+        has_a = self.canvas_a.get_roi_image() is not None
+        has_b = self.canvas_b.get_roi_image() is not None
+        self.btn_roi_search.setEnabled(has_a and has_b)
+        self.btn_roi_clear.setEnabled(has_a or has_b)
+
+    def _clear_rois(self) -> None:
+        self.canvas_a.clear_roi()
+        self.canvas_b.clear_roi()
+        self._update_roi_buttons()
+
+    def _on_dual_roi_search(self) -> None:
+        """ROI keresés indítása – backend választó menüvel."""
+        roi_a = self.canvas_a.get_roi_image()
+        roi_b = self.canvas_b.get_roi_image()
+        if roi_a is None or roi_b is None:
+            return
+
+        # Backend választó + delete_in_roi – ugyanolyan menüstílussal
+        menu = QMenu(self)
+        menu.setStyleSheet(self._MENU_STYLE)
+
+        sub = menu.addMenu("Backend")
+        ag  = QActionGroup(sub)
+        ag.setExclusive(True)
+        for be in self._BACKENDS:
+            act = QAction(be, sub, checkable=True)
+            act.setChecked(be == self._roi_last_backend)
+            ag.addAction(act)
+            sub.addAction(act)
+
+        act_del = QAction("ROI-n belüli meglévő párokat törölje előbb", menu,
+                          checkable=True)
+        act_del.setChecked(self._roi_delete_in_roi)
+        menu.addAction(act_del)
+        menu.addSeparator()
+        act_go  = QAction("🔍  Keresés indítása", menu)
+        menu.addAction(act_go)
+
+        chosen = menu.exec(self.btn_roi_search.mapToGlobal(
+            self.btn_roi_search.rect().bottomLeft()))
+        if chosen is None or chosen is not act_go:
+            return
+
+        # Frissítjük az állapotot
+        for act in ag.actions():
+            if act.isChecked():
+                self._roi_last_backend = act.text()
+                break
+        self._roi_delete_in_roi = act_del.isChecked()
+
+        self.dual_roi_search_requested.emit(
+            roi_a, roi_b,
+            self._roi_delete_in_roi,
+            self._roi_last_backend,
+        )
 
     # ── ROI helyi menü ───────────────────────────────────────────────────────
 

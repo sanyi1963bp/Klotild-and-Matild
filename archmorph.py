@@ -56,20 +56,32 @@ except Exception:
     _KorniaLoFTR = None
     _HAS_LOFTR = False
 
-from PyQt6.QtCore import Qt, QSize, QRectF, pyqtSignal
+try:
+    from PIL import Image as _PilImage
+    _HAS_PIL = True
+except Exception:
+    _PilImage = None
+    _HAS_PIL = False
+
+from PyQt6.QtCore import Qt, QSize, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction, QColor, QFont, QImage, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QGroupBox, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QSpinBox, QStackedWidget, QStatusBar, QTabWidget, QTextEdit,
-    QToolBar, QVBoxLayout, QHBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton,
+    QScrollArea, QSizePolicy, QSlider, QSplitter, QSpinBox, QStackedWidget,
+    QStatusBar, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QHBoxLayout,
+    QWidget,
 )
 
-# Saját modul
+# Saját modulok
 from point_editor import PointEditorWidget
+try:
+    from archmorph_config_loader import cfg
+except ImportError:
+    def cfg(key, default):  return default   # type: ignore[misc]
 
 APP_NAME    = "ArchMorph Professional"
 APP_VERSION = "0.5.0"
@@ -399,6 +411,393 @@ def blend_same_size_images(a: np.ndarray, b: np.ndarray,
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  Export / morph segédfüggvények
+# ════════════════════════════════════════════════════════════════════════════
+
+def _easing_linear(t: float) -> float:
+    return t
+
+def _easing_ease_in(t: float) -> float:
+    return t * t
+
+def _easing_ease_out(t: float) -> float:
+    return 1.0 - (1.0 - t) ** 2
+
+def _easing_ease_in_out(t: float) -> float:
+    return t * t * (3.0 - 2.0 * t)  # smoothstep
+
+EASING_FUNCS: Dict[str, Any] = {
+    "Lineáris":    _easing_linear,
+    "Lassú start": _easing_ease_in,
+    "Lassú vége":  _easing_ease_out,
+    "S-görbe":     _easing_ease_in_out,
+}
+
+
+def interpolate_homography(H: np.ndarray, t: float) -> np.ndarray:
+    """Lineáris interpoláció az egységmátrix és H között, majd normalizálás."""
+    I  = np.eye(3, dtype=np.float64)
+    Ht = (1.0 - t) * I + t * H.astype(np.float64)
+    Ht /= Ht[2, 2]
+    return Ht
+
+
+def generate_morph_frames(
+    img_a:     np.ndarray,
+    img_b:     np.ndarray,
+    H:         np.ndarray,
+    n_frames:  int  = 30,
+    easing:    str  = "S-görbe",
+    ping_pong: bool = False,
+) -> List[np.ndarray]:
+    """
+    Köztes képkockák listája az A→B morph animációhoz.
+    H: img_a → img_b homográfia mátrix (3×3).
+    Visszatér: BGr numpy tömbök listája.
+    """
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+    func  = EASING_FUNCS.get(easing, _easing_linear)
+    h, w  = img_b.shape[:2]
+    n     = max(n_frames, 2)
+    frames: List[np.ndarray] = []
+    for i in range(n):
+        t_raw = i / (n - 1)
+        t     = func(t_raw)
+        Ht    = interpolate_homography(H, t)
+        wa    = cv2.warpPerspective(img_a, Ht, (w, h),
+                                    flags=cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT,
+                                    borderValue=(0, 0, 0))
+        frame = blend_same_size_images(wa, img_b, alpha=t)
+        frames.append(frame)
+    if ping_pong:
+        frames = frames + frames[-2:0:-1]
+    return frames
+
+
+def export_mp4(frames: List[np.ndarray], path: str, fps: float = 25.0) -> None:
+    """Képkockák írása MP4 videóba (cv2.VideoWriter).
+
+    Először az 'avc1' (H.264) kodeket próbáljuk, ami szélesebb körben
+    lejátszható (böngészők, modern médialejátszók).  Ha ez nem nyílik meg
+    (pl. a rendszeren nincs H.264 encoder), visszaesünk az 'mp4v'-re.
+    """
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+    if not frames:
+        raise ValueError("Nincs exportálható képkocka.")
+    h, w = frames[0].shape[:2]
+
+    writer: Optional[cv2.VideoWriter] = None
+    for codec in ("avc1", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        candidate = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
+        if candidate.isOpened():
+            writer = candidate
+            break
+        candidate.release()
+
+    if writer is None:
+        raise RuntimeError(f"Nem sikerült megnyitni a videó-írót: {path}")
+    try:
+        for f in frames:
+            writer.write(f)
+    finally:
+        writer.release()
+
+
+def export_gif(frames: List[np.ndarray], path: str, fps: float = 15.0) -> None:
+    """Képkockák írása animált GIF-be (Pillow)."""
+    if not _HAS_PIL:
+        raise RuntimeError(
+            "A Pillow könyvtár nincs telepítve.\n"
+            "Telepítsd: pip install Pillow")
+    if not frames:
+        raise ValueError("Nincs exportálható képkocka.")
+    duration_ms = int(round(1000.0 / max(fps, 1.0)))
+    pil_frames  = []
+    for f in frames:
+        rgb = f[:, :, ::-1]          # BGR → RGB
+        pil_frames.append(_PilImage.fromarray(rgb))
+    pil_frames[0].save(
+        path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        loop=0,
+        duration=duration_ms,
+        optimize=False,
+    )
+
+
+def export_png_sequence(frames: List[np.ndarray], folder: str) -> None:
+    """Képkockák mentése PNG sorozatként a megadott mappába."""
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+    out = Path(folder)
+    out.mkdir(parents=True, exist_ok=True)
+    digits = len(str(len(frames)))
+    for i, f in enumerate(frames):
+        fname = out / f"frame_{i:0{digits}d}.png"
+        cv2.imwrite(str(fname), f)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Delaunay háromszög morph
+# ════════════════════════════════════════════════════════════════════════════
+
+def _add_boundary_points(
+    w: int, h: int,
+    pts_a: List[Tuple], pts_b: List[Tuple],
+) -> Tuple[List[Tuple], List[Tuple]]:
+    """Sarok- és élközép-pontok hozzáadása a teljes képterület lefedéséhez."""
+    boundary = [
+        (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+        (w // 2, 0), (w // 2, h - 1),
+        (0, h // 2), (w - 1, h // 2),
+    ]
+    return (list(pts_a) + boundary, list(pts_b) + boundary)
+
+
+def _morph_triangle(
+    img1:    np.ndarray,
+    img2:    np.ndarray,
+    out:     np.ndarray,
+    t1:      List[Tuple[int, int]],
+    t2:      List[Tuple[int, int]],
+    ti:      List[Tuple[int, int]],
+    alpha:   float,
+) -> None:
+    """
+    Két háromszög (t1 képből és t2 képből) affin-transzformálása a ti
+    köztes háromszögbe, majd alpha-keverés az out képre.
+    """
+    h_out, w_out = out.shape[:2]
+
+    r1 = cv2.boundingRect(np.float32([t1]))
+    r2 = cv2.boundingRect(np.float32([t2]))
+    ri = cv2.boundingRect(np.float32([ti]))
+
+    # Biztonsági ellenőrzések
+    if (ri[2] <= 0 or ri[3] <= 0 or r1[2] <= 0 or r1[3] <= 0
+            or r2[2] <= 0 or r2[3] <= 0):
+        return
+    if (ri[0] >= w_out or ri[1] >= h_out
+            or ri[0] + ri[2] <= 0 or ri[1] + ri[3] <= 0):
+        return
+
+    # Eltolt koordináták a bounding-rect origóhoz képest
+    t1_off = np.float32([[p[0] - r1[0], p[1] - r1[1]] for p in t1])
+    t2_off = np.float32([[p[0] - r2[0], p[1] - r2[1]] for p in t2])
+    ti_off = np.float32([[p[0] - ri[0], p[1] - ri[1]] for p in ti])
+
+    try:
+        M1 = cv2.getAffineTransform(t1_off, ti_off)
+        M2 = cv2.getAffineTransform(t2_off, ti_off)
+    except cv2.error:
+        return
+
+    # Képrészletek kimetszése
+    y1s, y1e = max(0, r1[1]), min(img1.shape[0], r1[1] + r1[3])
+    x1s, x1e = max(0, r1[0]), min(img1.shape[1], r1[0] + r1[2])
+    y2s, y2e = max(0, r2[1]), min(img2.shape[0], r2[1] + r2[3])
+    x2s, x2e = max(0, r2[0]), min(img2.shape[1], r2[0] + r2[2])
+    if y1s >= y1e or x1s >= x1e or y2s >= y2e or x2s >= x2e:
+        return
+
+    patch1 = img1[y1s:y1e, x1s:x1e].astype(np.float32)
+    patch2 = img2[y2s:y2e, x2s:x2e].astype(np.float32)
+
+    # BORDER_CONSTANT (fekete) – BORDER_REFLECT_101 tükörképes műterméket okoz
+    w1 = cv2.warpAffine(patch1, M1, (ri[2], ri[3]),
+                        flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=(0, 0, 0))
+    w2 = cv2.warpAffine(patch2, M2, (ri[2], ri[3]),
+                        flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=(0, 0, 0))
+
+    # Háromszög-maszk
+    mask = np.zeros((ri[3], ri[2], 3), dtype=np.float32)
+    cv2.fillConvexPoly(mask, np.int32(ti_off), (1.0, 1.0, 1.0),
+                       lineType=cv2.LINE_AA)
+
+    blended = (1.0 - alpha) * w1 + alpha * w2
+
+    # Kimenet ROI
+    ys = max(0, ri[1]); ye = min(h_out, ri[1] + ri[3])
+    xs = max(0, ri[0]); xe = min(w_out, ri[0] + ri[2])
+    dy = ye - ys; dx = xe - xs
+    if dy <= 0 or dx <= 0:
+        return
+
+    # A warpolt patch és maszk megfelelő szelete
+    patch_dy = ye - ri[1]; patch_dx = xe - ri[0]
+    ps_y = ri[1] - ys if ri[1] < 0 else 0   # (általában 0)
+    ps_x = ri[0] - xs if ri[0] < 0 else 0
+
+    b_slice  = blended[ps_y:ps_y + dy, ps_x:ps_x + dx]
+    m_slice  = mask[ps_y:ps_y + dy, ps_x:ps_x + dx]
+    roi      = out[ys:ye, xs:xe]
+    if b_slice.shape[:2] == roi.shape[:2] == m_slice.shape[:2]:
+        roi[:] = roi * (1.0 - m_slice) + b_slice * m_slice
+
+
+def generate_morph_frames_triangle(
+    img_a:     np.ndarray,
+    img_b:     np.ndarray,
+    pts_a:     List[Tuple[float, float]],
+    pts_b:     List[Tuple[float, float]],
+    n_frames:  int  = 40,
+    easing:    str  = "S-görbe",
+    ping_pong: bool = False,
+) -> List[np.ndarray]:
+    """
+    Klasszikus Delaunay-alapú háromszög-morph (Beier–Neely stílusú).
+    Mindkét képet affin-transzformációkkal warplja a köztes pontokhoz,
+    majd alpha-keveréssel ötvözi őket – valódi morph hatás.
+    """
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+    if len(pts_a) < 3 or len(pts_b) < 3:
+        raise ValueError(
+            "Delaunay morphhoz legalább 3 pontpár szükséges.\n"
+            "Adj hozzá több anchor pontot, vagy válassz más módszert!")
+
+    h, w = img_b.shape[:2]
+
+    # Pontok int-té konvertálva + határpontok hozzáadva
+    pa = [(int(round(x)), int(round(y))) for x, y in pts_a]
+    pb = [(int(round(x)), int(round(y))) for x, y in pts_b]
+    pa, pb = _add_boundary_points(w, h, pa, pb)
+
+    # Átlagpozíciók → erre számítjuk a Delaunay-t
+    pm = [((pa[i][0] + pb[i][0]) // 2, (pa[i][1] + pb[i][1]) // 2)
+          for i in range(len(pa))]
+
+    # Delaunay-triangulálás
+    subdiv = cv2.Subdiv2D((0, 0, w, h))
+    for p in pm:
+        subdiv.insert((float(p[0]), float(p[1])))
+    tri_list = subdiv.getTriangleList().astype(np.int32)
+
+    # Koordináta → index leképezés
+    pt_idx = {(p[0], p[1]): i for i, p in enumerate(pm)}
+    triangles: List[List[int]] = []
+    for tri in tri_list:
+        verts = [(tri[0], tri[1]), (tri[2], tri[3]), (tri[4], tri[5])]
+        if all(0 <= v[0] < w and 0 <= v[1] < h for v in verts):
+            idxs = [pt_idx.get(v) for v in verts]
+            if None not in idxs:
+                triangles.append(idxs)   # type: ignore[arg-type]
+
+    func   = EASING_FUNCS.get(easing, _easing_linear)
+    n      = max(n_frames, 2)
+    frames: List[np.ndarray] = []
+
+    for i in range(n):
+        t_raw = i / (n - 1)
+        t     = func(t_raw)
+
+        # Köztes pontok
+        pt = [(int(pa[j][0] * (1 - t) + pb[j][0] * t),
+               int(pa[j][1] * (1 - t) + pb[j][1] * t))
+              for j in range(len(pa))]
+
+        out = np.zeros((h, w, 3), dtype=np.float32)
+        for tri_idx in triangles:
+            _morph_triangle(
+                img_a, img_b, out,
+                [pa[k] for k in tri_idx],
+                [pb[k] for k in tri_idx],
+                [pt[k] for k in tri_idx],
+                alpha=t,
+            )
+        frames.append(np.clip(out, 0, 255).astype(np.uint8))
+
+    if ping_pong:
+        frames = frames + frames[-2:0:-1]
+    return frames
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Optikai folyam morph
+# ════════════════════════════════════════════════════════════════════════════
+
+def generate_morph_frames_flow(
+    img_a:      np.ndarray,
+    img_b:      np.ndarray,
+    n_frames:   int   = 40,
+    easing:     str   = "S-görbe",
+    ping_pong:  bool  = False,
+    pyr_scale:  float = 0.5,
+    levels:     int   = 4,
+    winsize:    int   = 21,
+    iterations: int   = 4,
+    poly_n:     int   = 7,
+    poly_sigma: float = 1.5,
+) -> List[np.ndarray]:
+    """
+    Optikai folyam alapú morph (Farneback dense flow).
+    Mindkét képet a flow-mező alapján deformálja a köztes állapot felé,
+    majd alpha-keveréssel ötvözi – pontpár nélkül is organikus mozgást ad.
+    """
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+
+    h, w = img_a.shape[:2]
+    # Célkép mérethez igazítás ha szükséges
+    if img_b.shape[:2] != (h, w):
+        img_b = cv2.resize(img_b, (w, h))
+
+    gray_a = cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY)
+    gray_b = cv2.cvtColor(img_b, cv2.COLOR_BGR2GRAY)
+
+    # A→B és B→A flow
+    farneback_kw = dict(
+        pyr_scale=pyr_scale, levels=levels, winsize=winsize,
+        iterations=iterations, poly_n=poly_n, poly_sigma=poly_sigma,
+        flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN,
+    )
+    flow_ab = cv2.calcOpticalFlowFarneback(gray_a, gray_b, None, **farneback_kw)
+    flow_ba = cv2.calcOpticalFlowFarneback(gray_b, gray_a, None, **farneback_kw)
+
+    # Pixel-rács
+    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32),
+                          np.arange(h, dtype=np.float32))
+
+    func   = EASING_FUNCS.get(easing, _easing_linear)
+    n      = max(n_frames, 2)
+    frames: List[np.ndarray] = []
+
+    for i in range(n):
+        t_raw = i / (n - 1)
+        t     = func(t_raw)
+
+        # A képet t irányban deformáljuk B felé
+        map_ax = gx + flow_ab[..., 0] * t
+        map_ay = gy + flow_ab[..., 1] * t
+        wa = cv2.remap(img_a, map_ax, map_ay,
+                       cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+
+        # B képet (1-t) irányban deformáljuk A felé
+        map_bx = gx + flow_ba[..., 0] * (1.0 - t)
+        map_by = gy + flow_ba[..., 1] * (1.0 - t)
+        wb = cv2.remap(img_b, map_bx, map_by,
+                       cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+
+        frame = cv2.addWeighted(wa, 1.0 - t, wb, t, 0.0)
+        frames.append(frame)
+
+    if ping_pong:
+        frames = frames + frames[-2:0:-1]
+    return frames
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  MatchOverviewCanvas  –  az összes automatikus egyezés megjelenítése
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -548,64 +947,76 @@ class AutomaticModeTab(QWidget):
 
         self.sp_max_kp = QSpinBox()
         self.sp_max_kp.setRange(128, 8192)
-        self.sp_max_kp.setValue(2048)
+        self.sp_max_kp.setValue(cfg("match.superpoint.max_keypoints", 4096))
         self._add_row(form, "Max. kulcspontok:", self.sp_max_kp,
             "A SuperPoint detektor által megtartott kulcspontok maximális száma.\n"
-            "Több pont → pontosabb illesztés, de lassabb futás és több GPU-memória.\n"
-            "Ajánlott: 1024–4096. Tartomány: 128–8192.")
+            "Több pont → pontosabb illesztés, de lassabb futás és több GPU-memória.\n\n"
+            "Forrás: a cvg/LightGlue GitHub-repo hivatalos demói és benchmarkjai\n"
+            "4096-ot használnak alapértelmezettként ('max_num_keypoints: 4096').\n"
+            "Ajánlott: 2048–4096. Tartomány: 128–8192.")
 
         self.sp_det_thresh = QDoubleSpinBox()
         self.sp_det_thresh.setRange(0.0001, 0.99)
-        self.sp_det_thresh.setSingleStep(0.0001)
+        self.sp_det_thresh.setSingleStep(0.001)
         self.sp_det_thresh.setDecimals(4)
-        self.sp_det_thresh.setValue(0.0005)
+        self.sp_det_thresh.setValue(cfg("match.superpoint.detection_threshold", 0.005))
         self._add_row(form, "Detekciós küszöb:", self.sp_det_thresh,
             "A SuperPoint detektor érzékenységi küszöbe (detection_threshold).\n"
             "Alacsonyabb érték → több pont detektálódik, beleértve a gyengébbeket is.\n"
-            "Magasabb érték → csak az erős, megbízható sarokpontok maradnak meg.\n"
-            "Ajánlott: 0.0001–0.005.")
+            "Magasabb érték → csak az erős, megbízható sarokpontok maradnak meg.\n\n"
+            "Forrás: SuperPoint hivatalos implementáció (Magic Leap / rpautrat/SuperPoint),\n"
+            "Hugging Face transformers, cvg/LightGlue – mindegyik 0.005-öt használ.\n"
+            "Ajánlott: 0.001–0.010.")
 
         self.sp_nms_radius = QSpinBox()
         self.sp_nms_radius.setRange(1, 20)
-        self.sp_nms_radius.setValue(4)
+        self.sp_nms_radius.setValue(cfg("match.superpoint.nms_radius", 4))
         self._add_row(form, "NMS sugár (px):", self.sp_nms_radius,
             "Non-Maximum Suppression sugár pixelben (nms_radius).\n"
             "Megakadályozza, hogy két kulcspont egymáshoz túl közel legyen.\n"
             "Nagyobb érték → ritkább, de egyenletesebb eloszlású pontok.\n"
-            "Kisebb érték → sűrűbb pontok, de lehetséges átfedés.\n"
+            "Kisebb érték → sűrűbb pontok, de lehetséges átfedés.\n\n"
+            "Forrás: SuperPoint eredeti cikk (DeTone et al. 2018) és a cvg/LightGlue\n"
+            "repo – mindkettő 4 px-t ajánl alapértelmezettként.\n"
             "Ajánlott: 3–6.")
 
         self.sp_match_thresh = QDoubleSpinBox()
         self.sp_match_thresh.setRange(0.01, 1.0)
         self.sp_match_thresh.setSingleStep(0.01)
         self.sp_match_thresh.setDecimals(3)
-        self.sp_match_thresh.setValue(0.10)
+        self.sp_match_thresh.setValue(cfg("match.superpoint.match_threshold", 0.10))
         self._add_row(form, "Match küszöb (LG):", self.sp_match_thresh,
             "A LightGlue párosító szűrési küszöbe (filter_threshold).\n"
             "Alacsonyabb → szigorúbb szűrés: kevesebb, de pontosabb egyezés.\n"
-            "Magasabb → több egyezés, de több hibás pár is átcsúszik a szűrőn.\n"
+            "Magasabb → több egyezés, de több hibás pár is átcsúszik a szűrőn.\n\n"
+            "Forrás: cvg/LightGlue – lightglue/lightglue.py, 'filter_threshold: 0.1'\n"
+            "Ez a könyvtár hivatalos alapértelmezettje.\n"
             "Ajánlott: 0.05–0.20.")
 
         self.sp_depth_conf = QDoubleSpinBox()
         self.sp_depth_conf.setRange(0.5, 1.0)
         self.sp_depth_conf.setSingleStep(0.01)
         self.sp_depth_conf.setDecimals(2)
-        self.sp_depth_conf.setValue(0.95)
+        self.sp_depth_conf.setValue(cfg("match.superpoint.depth_confidence", 0.95))
         self._add_row(form, "Mélység-konfidencia:", self.sp_depth_conf,
             "A LightGlue korai leállás küszöbe mélység irányban (depth_confidence).\n"
             "Ha az egyezések elég megbízhatók, a modell korábban megáll → gyorsabb.\n"
-            "1.0 = kikapcsolva (a modell végigfut minden rétegen).\n"
+            "1.0 = kikapcsolva (a modell végigfut minden rétegen).\n\n"
+            "Forrás: LightGlue ICCV 2023 cikk (Lindenberger et al.) és a cvg/LightGlue\n"
+            "repo – alapértelmezett érték: 0.95.\n"
             "Ajánlott: 0.90–0.98.")
 
         self.sp_width_conf = QDoubleSpinBox()
         self.sp_width_conf.setRange(0.5, 1.0)
         self.sp_width_conf.setSingleStep(0.01)
         self.sp_width_conf.setDecimals(2)
-        self.sp_width_conf.setValue(0.99)
+        self.sp_width_conf.setValue(cfg("match.superpoint.width_confidence", 0.99))
         self._add_row(form, "Szélesség-konfidencia:", self.sp_width_conf,
             "A LightGlue korai leállás küszöbe szélesség irányban (width_confidence).\n"
             "Ha az összes pont kezelve van elég biztosan, a modell megáll → gyorsabb.\n"
-            "1.0 = kikapcsolva.\n"
+            "1.0 = kikapcsolva.\n\n"
+            "Forrás: LightGlue ICCV 2023 cikk és a cvg/LightGlue repo –\n"
+            "alapértelmezett érték: 0.99.\n"
             "Ajánlott: 0.95–1.0.")
 
         return w
@@ -617,22 +1028,27 @@ class AutomaticModeTab(QWidget):
 
         self.dk_max_kp = QSpinBox()
         self.dk_max_kp.setRange(128, 8192)
-        self.dk_max_kp.setValue(2048)
+        self.dk_max_kp.setValue(cfg("match.disk.max_keypoints", 5000))
         self._add_row(form, "Max. kulcspontok:", self.dk_max_kp,
             "A DISK detektor által megtartott kulcspontok maximális száma.\n"
             "A DISK ismétlődő mintákon (ablaksorok, csempék, kövezet) jobban\n"
-            "teljesít mint a SuperPoint, mert ezekre van betanítva.\n"
-            "Ajánlott: 1024–4096.")
+            "teljesít mint a SuperPoint, mert ezekre van betanítva.\n\n"
+            "Forrás: Parskatt/DeDoDe és a kornia.feature.DISK implementációk\n"
+            "~5000–10000 kulcspontot használnak alapértelmezettként, mert\n"
+            "a DISK sűrűbben mintavételez mint a SuperPoint.\n"
+            "Ajánlott: 3000–8000.")
 
         self.dk_match_thresh = QDoubleSpinBox()
         self.dk_match_thresh.setRange(0.01, 1.0)
         self.dk_match_thresh.setSingleStep(0.01)
         self.dk_match_thresh.setDecimals(3)
-        self.dk_match_thresh.setValue(0.10)
+        self.dk_match_thresh.setValue(cfg("match.disk.match_threshold", 0.10))
         self._add_row(form, "Match küszöb (LG):", self.dk_match_thresh,
             "A LightGlue párosító szűrési küszöbe (filter_threshold).\n"
             "Alacsonyabb → szigorúbb szűrés: kevesebb, de pontosabb egyezés.\n"
-            "Magasabb → több egyezés, de több hibás pár is átcsúszik a szűrőn.\n"
+            "Magasabb → több egyezés, de több hibás pár is átcsúszik a szűrőn.\n\n"
+            "Forrás: cvg/LightGlue – lightglue/lightglue.py, 'filter_threshold: 0.1'\n"
+            "Ez a könyvtár hivatalos alapértelmezettje (SuperPoint és DISK esetén egyaránt).\n"
             "Ajánlott: 0.05–0.20.")
 
         note = QLabel(
@@ -650,6 +1066,7 @@ class AutomaticModeTab(QWidget):
 
         self.lf_pretrained = QComboBox()
         self.lf_pretrained.addItems(["outdoor", "indoor"])
+        self.lf_pretrained.setCurrentText(cfg("match.loftr.pretrained", "outdoor"))
         self._add_row(form, "Előtanított modell:", self.lf_pretrained,
             "Az előre tanított LoFTR modell típusa.\n\n"
             "'outdoor' (kültéri): épületek, utcák, terek, tájképek, műemlékek.\n"
@@ -660,7 +1077,7 @@ class AutomaticModeTab(QWidget):
         self.lf_conf_thresh.setRange(0.0, 1.0)
         self.lf_conf_thresh.setSingleStep(0.05)
         self.lf_conf_thresh.setDecimals(2)
-        self.lf_conf_thresh.setValue(0.50)
+        self.lf_conf_thresh.setValue(cfg("match.loftr.conf_threshold", 0.50))
         self._add_row(form, "Konfidencia küszöb:", self.lf_conf_thresh,
             "Az egyezés megbízhatósági küszöbe.\n"
             "Csak az ennél magasabb konfidenciájú egyezések maradnak meg.\n"
@@ -684,66 +1101,78 @@ class AutomaticModeTab(QWidget):
 
         self.si_max_kp = QSpinBox()
         self.si_max_kp.setRange(0, 8192)
-        self.si_max_kp.setValue(2048)
+        self.si_max_kp.setValue(cfg("match.sift.max_keypoints", 0))
         self._add_row(form, "Max. kulcspontok:", self.si_max_kp,
             "A SIFT által detektált kulcspontok maximális száma (nfeatures).\n"
-            "0 = korlátlan (minden detektált pont megmarad).\n"
-            "Ajánlott: 1000–3000 a sebesség és pontosság egyensúlyához.")
+            "0 = korlátlan (minden detektált pont megmarad).\n\n"
+            "Forrás: Lowe IJCV 2004 eredeti cikkje és az OpenCV SIFT dokumentáció –\n"
+            "mindkettő 0-t (korlátlan) ad meg alapértelmezettként.\n"
+            "Ha sok a felesleges pont, a RANSAC szűrő eltávolítja őket.\n"
+            "Ajánlott: 0 (korlátlan) vagy 2000–5000 ha lassú a feldolgozás.")
 
         self.si_octave_layers = QSpinBox()
         self.si_octave_layers.setRange(1, 10)
-        self.si_octave_layers.setValue(3)
+        self.si_octave_layers.setValue(cfg("match.sift.octave_layers", 3))
         self._add_row(form, "Oktáv-rétegek:", self.si_octave_layers,
             "Az oktávonkénti rétegek száma a Gauss-skálatérben (nOctaveLayers).\n"
-            "Több réteg → finomabb méretarány-invariancia, de lassabb futás.\n"
-            "Alapértelmezett: 3 (általában nem kell változtatni).")
+            "Több réteg → finomabb méretarány-invariancia, de lassabb futás.\n\n"
+            "Forrás: Lowe IJCV 2004 – 3 az eredeti értéke ('s=3 gives good results').\n"
+            "Az OpenCV alapértelmezettje is 3. Általában nem érdemes változtatni.")
 
         self.si_contrast = QDoubleSpinBox()
         self.si_contrast.setRange(0.001, 0.5)
         self.si_contrast.setSingleStep(0.001)
         self.si_contrast.setDecimals(3)
-        self.si_contrast.setValue(0.04)
+        self.si_contrast.setValue(cfg("match.sift.contrast_threshold", 0.04))
         self._add_row(form, "Kontraszt küszöb:", self.si_contrast,
             "Alacsony kontrasztú kulcspontok szűrési küszöbe (contrastThreshold).\n"
             "Alacsonyabb → több pont, beleértve a gyenge kontrasztú területeket.\n"
-            "Magasabb → csak erős kontrasztú, megbízható pontok maradnak.\n"
+            "Magasabb → csak erős kontrasztú, megbízható pontok maradnak.\n\n"
+            "Forrás: Lowe IJCV 2004 – 0.04 az eredeti ajánlott érték.\n"
+            "Az OpenCV alapértelmezettje szintén 0.04.\n"
             "Ajánlott: 0.02–0.08.")
 
         self.si_edge = QDoubleSpinBox()
         self.si_edge.setRange(1.0, 50.0)
         self.si_edge.setSingleStep(1.0)
         self.si_edge.setDecimals(1)
-        self.si_edge.setValue(10.0)
+        self.si_edge.setValue(cfg("match.sift.edge_threshold", 10.0))
         self._add_row(form, "Él küszöb:", self.si_edge,
             "Az élszűrő küszöbe (edgeThreshold).\n"
             "Az élek mentén lévő instabil kulcspontokat szűri ki.\n"
             "Magasabb → kevesebb él-jellegű pont törlése (több pont marad).\n"
-            "Alacsonyabb → szigorúbb élszűrés (kevesebb, de stabilabb pont).\n"
+            "Alacsonyabb → szigorúbb élszűrés (kevesebb, de stabilabb pont).\n\n"
+            "Forrás: Lowe IJCV 2004 – 10 az eredeti érték ('r=10').\n"
+            "Az OpenCV alapértelmezettje szintén 10.\n"
             "Ajánlott: 5–20.")
 
         self.si_sigma = QDoubleSpinBox()
         self.si_sigma.setRange(0.5, 5.0)
         self.si_sigma.setSingleStep(0.1)
         self.si_sigma.setDecimals(1)
-        self.si_sigma.setValue(1.6)
+        self.si_sigma.setValue(cfg("match.sift.sigma", 1.6))
         self._add_row(form, "Gauss sigma:", self.si_sigma,
             "A Gauss-simítás sigma paramétere a skálatér alaplépésénél.\n"
             "Kisebb (1.2–1.4): kis képeken, kevésbé zajos képeken.\n"
-            "Nagyobb (1.8–2.5): nagy, zajos képeken, erősebb simítás.\n"
-            "Alapértelmezett: 1.6 (Lowe eredeti értéke).")
+            "Nagyobb (1.8–2.5): nagy, zajos képeken, erősebb simítás.\n\n"
+            "Forrás: Lowe IJCV 2004 – 1.6 az eredeti értéke ('σ=1.6').\n"
+            "Az OpenCV alapértelmezettje szintén 1.6. Általában nem kell változtatni.")
 
         self.si_ratio = QDoubleSpinBox()
         self.si_ratio.setRange(0.5, 0.99)
         self.si_ratio.setSingleStep(0.01)
         self.si_ratio.setDecimals(2)
-        self.si_ratio.setValue(0.75)
+        self.si_ratio.setValue(cfg("match.sift.ratio_threshold", 0.80))
         self._add_row(form, "Lowe arány küszöb:", self.si_ratio,
             "Lowe-féle arányküszöb a hamis egyezések szűrésére.\n"
             "Egy egyezés elfogadott, ha:\n"
             "  legjobb_távolság < arány × második_legjobb_távolság\n"
             "Alacsonyabb → szigorúbb: kevesebb, de pontosabb egyezés.\n"
-            "Magasabb → több egyezés, de több hamis pár is.\n"
-            "Ajánlott: 0.65–0.80. Lowe eredeti értéke: 0.75.")
+            "Magasabb → több egyezés, de több hamis pár is.\n\n"
+            "Forrás: Lowe IJCV 2004 – 0.8 az eredeti mért optimális érték\n"
+            "('eliminates 90% of false matches while discarding less than 5%\n"
+            "of correct matches'). Az OpenCV tutorial szintén 0.8-at ajánl.\n"
+            "Ajánlott: 0.70–0.85.")
 
         note = QLabel(
             "<i>A SIFT (Scale-Invariant Feature Transform) klasszikus algoritmus –<br>"
@@ -773,14 +1202,17 @@ class AutomaticModeTab(QWidget):
         self.ransac_reproj.setRange(0.5, 20.0)
         self.ransac_reproj.setSingleStep(0.5)
         self.ransac_reproj.setDecimals(1)
-        self.ransac_reproj.setValue(4.0)
+        self.ransac_reproj.setValue(cfg("match.ransac.reproj_threshold", 3.0))
         self._add_row(form, "Reproj. küszöb (px):", self.ransac_reproj,
             "A RANSAC visszavetítési (reprojekciós) küszöb pixelben.\n"
             "Ha egy pontpár visszavetítési hibája nagyobb ennél, outliernek\n"
             "minősül és törlődik az illesztésből.\n"
             "Kisebb → szigorúbb szűrés (kevesebb pont, de pontosabb).\n"
-            "Nagyobb → engedékenyebb szűrés (több pont marad).\n"
-            "Ajánlott: 2.0–8.0.")
+            "Nagyobb → engedékenyebb szűrés (több pont marad).\n\n"
+            "Forrás: OpenCV cv2.findHomography dokumentáció –\n"
+            "alapértelmezett érték 3.0 px ('reproj_threshold=3').\n"
+            "OpenCV feature homography tutorial szintén 3.0-t ajánl.\n"
+            "Ajánlott: 2.0–5.0. Pixelszintű pontossághoz: 1.0–2.0.")
 
         self.cpu_chk = QCheckBox("CPU kényszerítése (debug / GPU nélkül)")
         self.cpu_chk.setChecked(False)
@@ -1023,17 +1455,582 @@ class PreviewTab(QWidget):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  ExportTab  –  morph animáció előnézete és exportja
+# ════════════════════════════════════════════════════════════════════════════
+
+class _MorphPreviewCanvas(QWidget):
+    """Egyszerű widget: egyetlen BGR képkocka megjelenítése."""
+    def __init__(self) -> None:
+        super().__init__()
+        self._pixmap: Optional[QPixmap] = None
+        self.setMinimumSize(320, 240)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
+
+    def set_frame(self, bgr: Optional[np.ndarray]) -> None:
+        self._pixmap = bgr_to_qpixmap(bgr) if bgr is not None else None
+        self.update()
+
+    def paintEvent(self, _) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#0d1117"))
+        if self._pixmap:
+            scaled = self._pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (self.width()  - scaled.width())  // 2
+            y = (self.height() - scaled.height()) // 2
+            p.drawPixmap(x, y, scaled)
+        else:
+            p.setPen(QColor("#444"))
+            p.setFont(QFont("Arial", 12))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                       "Nincs elérhető adat.\nFuttass illesztést először!")
+
+
+class ExportTab(QWidget):
+    """
+    Morph animáció előnézete, lejátszása és exportja.
+
+    Az animáció csak akkor elérhető, ha a projekt tartalmaz
+    homográfia mátrixot (auto-illesztés után).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._frames:      List[np.ndarray] = []
+        self._cur_idx:     int = 0
+        self._timer        = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._build_ui()
+
+    # ── UI felépítés ─────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        # ── Előnézeti vászon ─────────────────────────────────────────────────
+        self._canvas = _MorphPreviewCanvas()
+        root.addWidget(self._canvas, stretch=1)
+
+        # ── Csúszka + keretszám kijelző ──────────────────────────────────────
+        slider_row = QHBoxLayout()
+
+        lbl_a = QLabel("A")
+        lbl_a.setStyleSheet("color:#aaa;font-weight:bold;")
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 0)
+        self._slider.setValue(0)
+        self._slider.setTickInterval(1)
+        self._slider.valueChanged.connect(self._on_slider)
+        lbl_b = QLabel("B")
+        lbl_b.setStyleSheet("color:#aaa;font-weight:bold;")
+
+        self._lbl_frame = QLabel("–")
+        self._lbl_frame.setFixedWidth(60)
+        self._lbl_frame.setAlignment(Qt.AlignmentFlag.AlignRight |
+                                     Qt.AlignmentFlag.AlignVCenter)
+        self._lbl_frame.setStyleSheet("color:#888;font-size:11px;")
+
+        slider_row.addWidget(lbl_a)
+        slider_row.addWidget(self._slider, stretch=1)
+        slider_row.addWidget(lbl_b)
+        slider_row.addSpacing(8)
+        slider_row.addWidget(self._lbl_frame)
+        root.addLayout(slider_row)
+
+        # ── Lejátszó gombok ──────────────────────────────────────────────────
+        play_row = QHBoxLayout()
+        play_row.setSpacing(6)
+
+        self._btn_play = QPushButton("▶  Lejátszás")
+        self._btn_play.setCheckable(True)
+        self._btn_play.toggled.connect(self._on_play_toggle)
+        self._btn_play.setFixedHeight(30)
+
+        self._btn_prev = QPushButton("◀")
+        self._btn_prev.setFixedWidth(36)
+        self._btn_prev.setFixedHeight(30)
+        self._btn_prev.clicked.connect(lambda: self._step(-1))
+
+        self._btn_next = QPushButton("▶")
+        self._btn_next.setFixedWidth(36)
+        self._btn_next.setFixedHeight(30)
+        self._btn_next.clicked.connect(lambda: self._step(1))
+
+        play_row.addWidget(self._btn_prev)
+        play_row.addWidget(self._btn_next)
+        play_row.addSpacing(8)
+        play_row.addWidget(self._btn_play)
+        play_row.addStretch()
+
+        root.addLayout(play_row)
+
+        # ── Elválasztó ───────────────────────────────────────────────────────
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("color:#343b45;")
+        root.addWidget(sep1)
+
+        # ── Beállítások ──────────────────────────────────────────────────────
+        cfg_row = QHBoxLayout()
+        cfg_row.setSpacing(16)
+
+        # Képkockák száma
+        grp_frames = QGroupBox("Képkockák")
+        fl = QFormLayout(grp_frames)
+        fl.setContentsMargins(8, 12, 8, 8)
+
+        self._spin_frames = QSpinBox()
+        self._spin_frames.setRange(4, 300)
+        self._spin_frames.setValue(cfg("export.defaults.frame_count", 40))
+        self._spin_frames.setToolTip("Hány közbülső képkocka legyen az animációban")
+        self._spin_frames.valueChanged.connect(self._mark_stale)
+
+        self._spin_fps = QDoubleSpinBox()
+        self._spin_fps.setRange(1.0, 60.0)
+        self._spin_fps.setValue(cfg("export.defaults.fps", 25.0))
+        self._spin_fps.setSingleStep(1.0)
+        self._spin_fps.setToolTip("Lejátszási sebesség (képkocka/másodperc)")
+        # FPS szándékosan nincs _mark_stale-hez kötve:
+        # az FPS csak lejátszási sebességet / exportidőzítést befolyásol,
+        # a képkockák tartalmát nem érinti.
+
+        fl.addRow("Darab:", self._spin_frames)
+        fl.addRow("FPS:",   self._spin_fps)
+        cfg_row.addWidget(grp_frames)
+
+        # ── Módszer + per-módszer beállítások (QStackedWidget) ────────────────
+        grp_method = QGroupBox("Morph módszer")
+        ml = QVBoxLayout(grp_method)
+        ml.setContentsMargins(8, 12, 8, 8)
+        ml.setSpacing(6)
+
+        self._combo_method = QComboBox()
+        self._combo_method.addItems([
+            "Delaunay háromszög",
+            "Optikai folyam",
+            "Homográfia",
+        ])
+        self._combo_method.setCurrentText(
+            cfg("export.defaults.method", "Delaunay háromszög"))
+        self._combo_method.setToolTip(
+            "Delaunay háromszög: klasszikus face-morph, legjobb minőség (pontpár kell)\n"
+            "Optikai folyam: dense flow alapú, organikus mozgás (pontpár nélkül is)\n"
+            "Homográfia: perspektíva-interpoláció, gyors (homográfia mátrix kell)"
+        )
+        ml.addWidget(self._combo_method)
+
+        # Per-módszer panel stack
+        self._method_stack = QStackedWidget()
+
+        # Panel 0 – Delaunay
+        pan_tri = QWidget()
+        fl_tri = QFormLayout(pan_tri)
+        fl_tri.setContentsMargins(0, 4, 0, 0)
+        self._lbl_tri_info = QLabel("–")
+        self._lbl_tri_info.setStyleSheet("color:#7bc; font-size:11px;")
+        self._lbl_tri_info.setWordWrap(True)
+        fl_tri.addRow("Pontpárok:", self._lbl_tri_info)
+        self._method_stack.addWidget(pan_tri)
+
+        # Panel 1 – Optikai folyam
+        pan_flow = QWidget()
+        fl_flow = QFormLayout(pan_flow)
+        fl_flow.setContentsMargins(0, 4, 0, 0)
+        self._combo_flow_quality = QComboBox()
+        self._combo_flow_quality.addItems(["Gyors", "Normál", "Részletes"])
+        self._combo_flow_quality.setCurrentText("Normál")
+        self._combo_flow_quality.setToolTip(
+            "Farneback optikai folyam (cv2.calcOpticalFlowFarneback) előbeállítások.\n\n"
+            "Gyors  – winsize=15, levels=3, poly_n=5, σ=1.1, iter=3\n"
+            "  Az OpenCV tutorial alapértelmezett értékeit követi.\n\n"
+            "Normál – winsize=21, levels=4, poly_n=7, σ=1.5, iter=4\n"
+            "  Kiegyensúlyozott minőség/sebesség; poly_n=7 + σ=1.5\n"
+            "  a Farneback 2003 cikk poly_n=7 ajánlásának megfelelő.\n\n"
+            "Részletes – winsize=33, levels=5, poly_n=7, σ=1.5, iter=5\n"
+            "  Maximális minőség; poly_n=7 esetén σ=1.5 az ajánlott\n"
+            "  érték (Farneback 2003 és az OpenCV forráskód alapján).\n\n"
+            "Forrás: OpenCV optikai folyam tutorial, Gunnar Farneback\n"
+            "'Two-Frame Motion Estimation Based on Polynomial Expansion'\n"
+            "(SCIA 2003), és LearnOpenCV.com benchmarkok.")
+        fl_flow.addRow("Minőség:", self._combo_flow_quality)
+        self._method_stack.addWidget(pan_flow)
+
+        # Panel 2 – Homográfia
+        pan_hom = QWidget()
+        fl_hom  = QFormLayout(pan_hom)
+        fl_hom.setContentsMargins(0, 4, 0, 0)
+        lbl_hom = QLabel("Homográfia mátrix\nszükséges (auto-illesztés után)")
+        lbl_hom.setStyleSheet("color:#7bc; font-size:11px;")
+        fl_hom.addRow(lbl_hom)
+        self._method_stack.addWidget(pan_hom)
+
+        ml.addWidget(self._method_stack)
+        self._combo_method.currentIndexChanged.connect(
+            self._method_stack.setCurrentIndex)
+        self._combo_method.currentIndexChanged.connect(self._mark_stale)
+        self._combo_flow_quality.currentIndexChanged.connect(self._mark_stale)
+        cfg_row.addWidget(grp_method)
+
+        # ── Easing + ping-pong ────────────────────────────────────────────────
+        grp_ease = QGroupBox("Animáció")
+        el = QFormLayout(grp_ease)
+        el.setContentsMargins(8, 12, 8, 8)
+
+        self._combo_ease = QComboBox()
+        self._combo_ease.addItems(list(EASING_FUNCS.keys()))
+        self._combo_ease.setCurrentText(cfg("export.defaults.easing", "S-görbe"))
+        self._combo_ease.setToolTip(
+            "Az idő→pozíció átmeneti görbe:\n"
+            "Lineáris: egyenletes tempó\n"
+            "S-görbe: lassú start + lassú vég (ajánlott)")
+
+        self._chk_pingpong = QCheckBox("Ping-pong (A→B→A)")
+        self._chk_pingpong.setChecked(cfg("export.defaults.ping_pong", False))
+        self._chk_pingpong.setToolTip(
+            "Az animáció végén visszafelé is lejátssza (A→B→A hurok)")
+
+        self._combo_ease.currentIndexChanged.connect(self._mark_stale)
+        self._chk_pingpong.toggled.connect(self._mark_stale)
+        el.addRow("Easing:", self._combo_ease)
+        el.addRow("",        self._chk_pingpong)
+        cfg_row.addWidget(grp_ease)
+
+        # ── Generálás gomb ────────────────────────────────────────────────────
+        grp_gen = QGroupBox("Generálás")
+        gl = QVBoxLayout(grp_gen)
+        gl.setContentsMargins(8, 12, 8, 8)
+        self._btn_generate = QPushButton("⚙  Képkockák generálása")
+        self._btn_generate.setToolTip(
+            "Előnézeti képkockák előállítása a kiválasztott módszerrel")
+        self._btn_generate.clicked.connect(self._generate)
+        self._btn_generate.setFixedHeight(36)
+
+        self._lbl_stale = QLabel("")
+        self._lbl_stale.setStyleSheet("color:#e8a020;font-size:11px;")
+        self._lbl_stale.setWordWrap(True)
+
+        gl.addWidget(self._btn_generate)
+        gl.addWidget(self._lbl_stale)
+        gl.addStretch()
+        cfg_row.addWidget(grp_gen)
+
+        root.addLayout(cfg_row)
+
+        # ── Export gombok ────────────────────────────────────────────────────
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#343b45;")
+        root.addWidget(sep2)
+
+        exp_row = QHBoxLayout()
+        exp_row.setSpacing(8)
+
+        self._btn_mp4 = QPushButton("🎬  MP4 export…")
+        self._btn_mp4.setFixedHeight(34)
+        self._btn_mp4.setToolTip("Animáció mentése MP4 videóként (OpenCV)")
+        self._btn_mp4.clicked.connect(self._export_mp4)
+
+        self._btn_gif = QPushButton("🎞  GIF export…")
+        self._btn_gif.setFixedHeight(34)
+        self._btn_gif.setToolTip("Animáció mentése animált GIF-ként (Pillow)")
+        self._btn_gif.clicked.connect(self._export_gif)
+
+        self._btn_png = QPushButton("🖼  PNG sorozat…")
+        self._btn_png.setFixedHeight(34)
+        self._btn_png.setToolTip("Minden képkocka mentése külön PNG fájlként")
+        self._btn_png.clicked.connect(self._export_png)
+
+        self._lbl_export_status = QLabel("")
+        self._lbl_export_status.setStyleSheet("color:#888;font-size:11px;")
+
+        exp_row.addWidget(self._btn_mp4)
+        exp_row.addWidget(self._btn_gif)
+        exp_row.addWidget(self._btn_png)
+        exp_row.addStretch()
+        exp_row.addWidget(self._lbl_export_status)
+        root.addLayout(exp_row)
+
+        self._set_export_enabled(False)
+
+    # ── Elavult jelző ────────────────────────────────────────────────────────
+
+    _BTN_GENERATE_NORMAL = (
+        "QPushButton{background:#2c3340;color:#eee;padding:4px 10px;"
+        "border-radius:4px;font-size:12px;}"
+        "QPushButton:hover{background:#3a4252;}"
+        "QPushButton:disabled{background:#2e2e2e;color:#555;}"
+    )
+    _BTN_GENERATE_STALE = (
+        "QPushButton{background:#5a3800;color:#ffcc66;padding:4px 10px;"
+        "border-radius:4px;font-size:12px;font-weight:bold;"
+        "border:1px solid #e8a020;}"
+        "QPushButton:hover{background:#7a4d00;}"
+        "QPushButton:disabled{background:#2e2e2e;color:#555;}"
+    )
+
+    def _mark_stale(self, *_) -> None:
+        """Bármely beállítás változott → jelzi hogy újragenerálás kell."""
+        if not self._frames:
+            # Még nincs adat, nincs mit jelezni
+            return
+        self._btn_generate.setStyleSheet(self._BTN_GENERATE_STALE)
+        self._btn_generate.setText("⚙  Újragenerálás szükséges!")
+        self._lbl_stale.setText("⚠  A beállítások megváltoztak – az előnézet elavult.")
+        self._lbl_export_status.setText("")
+
+    def _clear_stale(self) -> None:
+        """Generálás után visszaállítja a normál állapotot."""
+        self._btn_generate.setStyleSheet(self._BTN_GENERATE_NORMAL)
+        self._btn_generate.setText("⚙  Képkockák generálása")
+        self._lbl_stale.setText("")
+
+    # ── Adatok fogadása a MainWindow-tól ─────────────────────────────────────
+
+    def set_morph_data(
+        self,
+        img_a:  np.ndarray,
+        img_b:  np.ndarray,
+        H:      Optional[np.ndarray]         = None,
+        pts_a:  Optional[List[Tuple]]        = None,
+        pts_b:  Optional[List[Tuple]]        = None,
+    ) -> None:
+        """
+        Frissíti a forrásadatokat és automatikusan választ módszert.
+        Ha vannak pontpárok → Delaunay; ha csak H → Homográfia.
+        """
+        self._img_a = img_a
+        self._img_b = img_b
+        self._H     = H
+        self._pts_a = pts_a or []
+        self._pts_b = pts_b or []
+
+        # Info frissítése a Delaunay panelen
+        n_pts = len(self._pts_a)
+        if n_pts >= 3:
+            self._lbl_tri_info.setText(
+                f"{n_pts} pontpár elérhető  ✓")
+            self._lbl_tri_info.setStyleSheet("color:#6c6; font-size:11px;")
+        else:
+            self._lbl_tri_info.setText(
+                f"{n_pts} pontpár  (min. 3 szükséges)")
+            self._lbl_tri_info.setStyleSheet("color:#c84; font-size:11px;")
+
+        # Módszer auto-kiválasztás
+        if n_pts >= 3:
+            self._combo_method.setCurrentText("Delaunay háromszög")
+        elif H is not None:
+            self._combo_method.setCurrentText("Homográfia")
+        else:
+            self._combo_method.setCurrentText("Optikai folyam")
+
+        self._generate()
+
+    # ── Belső logika ─────────────────────────────────────────────────────────
+
+    # Farneback paraméter előbeállítások – archmorph_config.toml → [flow.presets.*]
+    # Értékek a konfigfájlból olvasódnak; ha nincs konfigfájl, a beépített
+    # értékek maradnak (OpenCV tutorial + Farneback 2003 ajánlások alapján).
+    _FLOW_PARAMS = {
+        "Gyors": dict(
+            pyr_scale  = cfg("flow.presets.fast.pyr_scale",  0.5),
+            levels     = cfg("flow.presets.fast.levels",     3),
+            winsize    = cfg("flow.presets.fast.winsize",    15),
+            iterations = cfg("flow.presets.fast.iterations", 3),
+            poly_n     = cfg("flow.presets.fast.poly_n",     5),
+            poly_sigma = cfg("flow.presets.fast.poly_sigma", 1.1),
+        ),
+        "Normál": dict(
+            pyr_scale  = cfg("flow.presets.normal.pyr_scale",  0.5),
+            levels     = cfg("flow.presets.normal.levels",     4),
+            winsize    = cfg("flow.presets.normal.winsize",    21),
+            iterations = cfg("flow.presets.normal.iterations", 4),
+            poly_n     = cfg("flow.presets.normal.poly_n",     7),
+            poly_sigma = cfg("flow.presets.normal.poly_sigma", 1.5),
+        ),
+        "Részletes": dict(
+            pyr_scale  = cfg("flow.presets.detailed.pyr_scale",  0.5),
+            levels     = cfg("flow.presets.detailed.levels",     5),
+            winsize    = cfg("flow.presets.detailed.winsize",    33),
+            iterations = cfg("flow.presets.detailed.iterations", 5),
+            poly_n     = cfg("flow.presets.detailed.poly_n",     7),
+            poly_sigma = cfg("flow.presets.detailed.poly_sigma", 1.5),
+        ),
+    }
+
+    def _generate(self) -> None:
+        if not hasattr(self, "_img_a") or self._img_a is None:
+            QMessageBox.information(
+                self, "Nincs adat",
+                "Nincs elérhető illesztési adat.\n"
+                "Futtass előbb automatikus illesztést!")
+            return
+
+        n        = self._spin_frames.value()
+        easing   = self._combo_ease.currentText()
+        pingpong = self._chk_pingpong.isChecked()
+        method   = self._combo_method.currentText()
+
+        prog = QProgressDialog("Képkockák generálása…", None, 0, 0, self)
+        prog.setWindowTitle("ArchMorph")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(300)
+        prog.setValue(0)
+        QApplication.processEvents()
+
+        try:
+            if method == "Delaunay háromszög":
+                if len(self._pts_a) < 3:
+                    raise ValueError(
+                        "Delaunay morphhoz legalább 3 pontpár szükséges!\n"
+                        "Adj hozzá anchor pontokat, vagy válassz más módszert.")
+                self._frames = generate_morph_frames_triangle(
+                    self._img_a, self._img_b,
+                    self._pts_a, self._pts_b,
+                    n_frames=n, easing=easing, ping_pong=pingpong)
+                method_short = "Delaunay"
+
+            elif method == "Optikai folyam":
+                quality = self._combo_flow_quality.currentText()
+                fp = self._FLOW_PARAMS.get(quality, self._FLOW_PARAMS["Normál"])
+                self._frames = generate_morph_frames_flow(
+                    self._img_a, self._img_b,
+                    n_frames=n, easing=easing, ping_pong=pingpong,
+                    **fp)
+                method_short = f"Flow ({quality})"
+
+            else:  # Homográfia
+                if self._H is None:
+                    raise ValueError(
+                        "Homográfia mátrix nem elérhető!\n"
+                        "Futtass előbb automatikus illesztést.")
+                self._frames = generate_morph_frames(
+                    self._img_a, self._img_b, self._H,
+                    n_frames=n, easing=easing, ping_pong=pingpong)
+                method_short = "Homográfia"
+
+            total = len(self._frames)
+            self._slider.setRange(0, max(0, total - 1))
+            self._cur_idx = 0
+            self._slider.setValue(0)
+            self._show_frame(0)
+            self._set_export_enabled(True)
+            self._clear_stale()
+            self._lbl_export_status.setText(
+                f"{total} képkocka  |  ~{total / self._spin_fps.value():.1f} s"
+                f"  |  {method_short}")
+
+        except Exception as exc:
+            QMessageBox.critical(self, "Generálási hiba", str(exc))
+        finally:
+            prog.close()
+
+    def _show_frame(self, idx: int) -> None:
+        if not self._frames:
+            return
+        idx = max(0, min(idx, len(self._frames) - 1))
+        self._cur_idx = idx
+        self._canvas.set_frame(self._frames[idx])
+        self._lbl_frame.setText(f"{idx + 1} / {len(self._frames)}")
+
+    def _on_slider(self, value: int) -> None:
+        self._show_frame(value)
+
+    def _step(self, delta: int) -> None:
+        if not self._frames:
+            return
+        new_idx = (self._cur_idx + delta) % len(self._frames)
+        self._slider.setValue(new_idx)
+
+    def _on_play_toggle(self, checked: bool) -> None:
+        if checked:
+            fps = max(1.0, self._spin_fps.value())
+            self._timer.start(int(1000.0 / fps))
+            self._btn_play.setText("⏹  Stop")
+        else:
+            self._timer.stop()
+            self._btn_play.setText("▶  Lejátszás")
+
+    def _tick(self) -> None:
+        if not self._frames:
+            return
+        next_idx = (self._cur_idx + 1) % len(self._frames)
+        self._slider.setValue(next_idx)
+
+    def _set_export_enabled(self, enabled: bool) -> None:
+        for btn in (self._btn_mp4, self._btn_gif, self._btn_png,
+                    self._btn_play, self._btn_prev, self._btn_next):
+            btn.setEnabled(enabled)
+        if not enabled:
+            self._lbl_export_status.setText("")
+
+    # ── Export műveletek ─────────────────────────────────────────────────────
+
+    def _export_mp4(self) -> None:
+        if not self._frames:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "MP4 mentése", "morph_animation.mp4",
+            "MP4 videó (*.mp4);;Minden fájl (*)")
+        if not path:
+            return
+        try:
+            export_mp4(self._frames, path, fps=self._spin_fps.value())
+            self._lbl_export_status.setText(f"MP4 elmentve: {Path(path).name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "MP4 export hiba", str(exc))
+
+    def _export_gif(self) -> None:
+        if not self._frames:
+            return
+        gif_fps = min(self._spin_fps.value(), 50.0)  # GIF max ~50 fps
+        path, _ = QFileDialog.getSaveFileName(
+            self, "GIF mentése", "morph_animation.gif",
+            "Animált GIF (*.gif);;Minden fájl (*)")
+        if not path:
+            return
+        try:
+            export_gif(self._frames, path, fps=gif_fps)
+            self._lbl_export_status.setText(f"GIF elmentve: {Path(path).name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "GIF export hiba", str(exc))
+
+    def _export_png(self) -> None:
+        if not self._frames:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Mappa kijelölése a PNG sorozatnak")
+        if not folder:
+            return
+        try:
+            export_png_sequence(self._frames, folder)
+            self._lbl_export_status.setText(
+                f"{len(self._frames)} PNG elmentve → {Path(folder).name}/")
+        except Exception as exc:
+            QMessageBox.critical(self, "PNG export hiba", str(exc))
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  Főablak
 # ════════════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
+    _IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+
     def __init__(self) -> None:
         super().__init__()
         self.settings = AppSettings()
         self.project  = ProjectState()
         self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
         self.resize(1280, 820)
+        self.setAcceptDrops(True)
         self._build_ui()
+        self._build_toolbar()
         self._build_menu()
         self._apply_dark_theme()
         self.statusBar().showMessage("Kész.")
@@ -1047,14 +2044,23 @@ class MainWindow(QMainWindow):
         self.auto_tab    = AutomaticModeTab(self.settings, self.project)
         self.editor_tab  = AdvancedEditorTab(self.settings, self.project)
         self.preview_tab = PreviewTab(self.settings)
+        self.export_tab  = ExportTab()
 
         self.auto_tab.request_auto_match.connect(self.run_auto_match)
         self.editor_tab.point_editor.roi_search_requested.connect(
             self.run_roi_match)
+        self.editor_tab.point_editor.dual_roi_search_requested.connect(
+            self.run_dual_roi_match)
+        # kép drag & drop a canvasokon → betöltés
+        self.editor_tab.point_editor.image_a_drop_requested.connect(
+            lambda p: self._load_image_from_path(p, "A"))
+        self.editor_tab.point_editor.image_b_drop_requested.connect(
+            lambda p: self._load_image_from_path(p, "B"))
 
         self.tabs.addTab(self.auto_tab,    "⚡  Automata illesztés")
         self.tabs.addTab(self.editor_tab,  "✏️  Pontszerkesztő")
         self.tabs.addTab(self.preview_tab, "🔍  Előnézet")
+        self.tabs.addTab(self.export_tab,  "🎬  Export")
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
@@ -1101,6 +2107,80 @@ class MainWindow(QMainWindow):
         act_clear_pts.triggered.connect(self.clear_all_points)
         edit_menu.addAction(act_clear_pts)
 
+    # ── Drag & drop (főablak) ────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                p = url.toLocalFile().lower()
+                if p.endswith(self._IMG_EXTS) or p.endswith(".json"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        paths = [u.toLocalFile() for u in event.mimeData().urls()]
+        imgs   = [p for p in paths if p.lower().endswith(self._IMG_EXTS)]
+        jsons  = [p for p in paths if p.lower().endswith(".json")]
+
+        # Projekt JSON – az első érvényes .json-t töltjük be
+        if jsons:
+            self._load_project_from_path(jsons[0])
+            event.acceptProposedAction()
+            return
+
+        # Képek: 1 kép → A slotba (ha A üres, különben B-be), 2+ → A és B
+        if len(imgs) == 1:
+            slot = "A" if self.project.image_a is None else "B"
+            self._load_image_from_path(imgs[0], slot)
+        elif len(imgs) >= 2:
+            self._load_image_from_path(imgs[0], "A")
+            self._load_image_from_path(imgs[1], "B")
+            if len(imgs) > 2:
+                self.statusBar().showMessage(
+                    f"Kép A+B betöltve  –  {len(imgs) - 2} fájl figyelmen kívül hagyva."
+                )
+        event.acceptProposedAction()
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Gyorseszközök")
+        tb.setMovable(False)
+        tb.setObjectName("main_toolbar")
+        self.addToolBar(tb)
+
+        act_a = QAction("📂  Kép A", self)
+        act_a.setToolTip("Kép A betöltése (Ctrl+1)")
+        act_a.triggered.connect(lambda: self.load_image("A"))
+
+        act_b = QAction("📂  Kép B", self)
+        act_b.setToolTip("Kép B betöltése (Ctrl+2)")
+        act_b.triggered.connect(lambda: self.load_image("B"))
+
+        act_both = QAction("📂  Mindkét kép…", self)
+        act_both.setToolTip(
+            "Két képfájl egyszerre kijelölése\n"
+            "Az első lesz Kép A, a második Kép B")
+        act_both.triggered.connect(self.load_images_both)
+
+        tb.addAction(act_a)
+        tb.addAction(act_b)
+        tb.addAction(act_both)
+        tb.addSeparator()
+
+        act_save = QAction("💾  Mentés", self)
+        act_save.setToolTip("Projekt mentése (Ctrl+S)")
+        act_save.triggered.connect(self.save_project)
+
+        act_open = QAction("📁  Projekt", self)
+        act_open.setToolTip("Projekt megnyitása (Ctrl+O)")
+        act_open.triggered.connect(self.load_project)
+
+        tb.addAction(act_save)
+        tb.addAction(act_open)
+
     def _apply_dark_theme(self) -> None:
         self.setStyleSheet("""
             QMainWindow, QWidget   { background-color:#1a1f24; color:#d7dde5; }
@@ -1125,6 +2205,17 @@ class MainWindow(QMainWindow):
                                      border:1px solid #343b45; }
             QMenu::item:selected   { background:#2c3340; }
             QSplitter::handle      { background:#343b45; }
+            QToolBar#main_toolbar  { background:#111418; border:none;
+                                     padding:2px 4px; spacing:2px; }
+            QToolBar#main_toolbar QToolButton
+                                   { background:#252a33; color:#ddd;
+                                     padding:4px 10px; border-radius:4px;
+                                     font-size:12px; }
+            QToolBar#main_toolbar QToolButton:hover
+                                   { background:#3a4252; }
+            QToolBar#main_toolbar::separator
+                                   { background:#343b45; width:1px;
+                                     margin:4px 6px; }
         """)
 
     # ── Kép betöltése ────────────────────────────────────────────────────────
@@ -1294,26 +2385,19 @@ class MainWindow(QMainWindow):
         """Szerkesztés → Visszavonás menüponthoz."""
         self.editor_tab.point_editor.undo()
 
-    def load_image(self, slot: str) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Kép {slot} megnyitása", "",
-            "Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)"
-        )
-        if not path:
-            return
+    def _load_image_from_path(self, path: str, slot: str) -> None:
+        """Belső segédmetódus: betölt egy képfájlt a megadott slotba (A vagy B)."""
         try:
             img = cv_imread_unicode_safe(Path(path))
         except Exception as exc:
             QMessageBox.critical(self, "Hiba a kép betöltésekor", str(exc))
             return
-
         if slot == "A":
             self.project.image_a      = img
             self.project.image_a_path = Path(path)
         else:
             self.project.image_b      = img
             self.project.image_b_path = Path(path)
-
         self.editor_tab.load_images()
         self._update_title()
         self.tabs.setCurrentIndex(1)
@@ -1321,6 +2405,31 @@ class MainWindow(QMainWindow):
             f"Kép {slot} betöltve: {Path(path).name}  "
             f"({img.shape[1]}×{img.shape[0]} px)"
         )
+
+    def load_image(self, slot: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Kép {slot} megnyitása", "",
+            "Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)"
+        )
+        if path:
+            self._load_image_from_path(path, slot)
+
+    def load_images_both(self) -> None:
+        """Két képfájl egyszerre kijelölése – az első lesz A, a második B."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Két kép kijelölése (első = A, második = B)", "",
+            "Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)"
+        )
+        if not paths:
+            return
+        if len(paths) >= 1:
+            self._load_image_from_path(paths[0], "A")
+        if len(paths) >= 2:
+            self._load_image_from_path(paths[1], "B")
+        if len(paths) > 2:
+            self.statusBar().showMessage(
+                f"Kép A+B betöltve  –  {len(paths) - 2} fájl figyelmen kívül hagyva."
+            )
 
     # ── Automatikus illesztés ────────────────────────────────────────────────
 
@@ -1371,6 +2480,14 @@ class MainWindow(QMainWindow):
                 self.project.aligned_overlay_preview = overlay
                 self.preview_tab.set_alignment_images(
                     self.project.image_b, warped, overlay)
+                # Export tab frissítése (képek + homográfia + anchor pontok)
+                self.export_tab.set_morph_data(
+                    self.project.image_a,
+                    self.project.image_b,
+                    H     = H,
+                    pts_a = [tuple(p) for p in self.project.anchor_points_a],
+                    pts_b = [tuple(p) for p in self.project.anchor_points_b],
+                )
 
             self.editor_tab.refresh_views()
             self.tabs.setCurrentIndex(1)
@@ -1382,6 +2499,120 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Illesztési hiba",
                                  log_exception_text("Hiba az illesztés során:", exc))
             self.statusBar().showMessage("Illesztés sikertelen.")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    # ── Kétoldali ROI illesztés ──────────────────────────────────────────────
+
+    def run_dual_roi_match(
+        self,
+        roi_a,          # QRectF képkoordban
+        roi_b,          # QRectF képkoordban
+        delete_in_roi:  bool,
+        backend:        str,
+    ) -> None:
+        """
+        Illesztés csak a két ROI területén belül.
+        Mindkét képet a saját ROI-jára vágjuk, az eredmény koordinátákat
+        visszaoffseteljük az eredeti képkoordináta-rendszerbe.
+        """
+        if self.project.image_a is None or self.project.image_b is None:
+            QMessageBox.warning(self, "Hiányzó kép", "Tölts be mindkét képet!")
+            return
+
+        img_a = self.project.image_a
+        img_b = self.project.image_b
+
+        # ROI vágás – integer koordinátákra konvertálva, határokat klampoljuk
+        def _crop(img, roi):
+            h, w = img.shape[:2]
+            x1 = max(0, int(roi.left()))
+            y1 = max(0, int(roi.top()))
+            x2 = min(w, int(roi.right()))
+            y2 = min(h, int(roi.bottom()))
+            if x2 <= x1 or y2 <= y1:
+                raise ValueError("A ROI kívül esik a képen vagy üres.")
+            return img[y1:y2, x1:x2], x1, y1
+
+        try:
+            crop_a, off_ax, off_ay = _crop(img_a, roi_a)
+            crop_b, off_bx, off_by = _crop(img_b, roi_b)
+        except ValueError as exc:
+            QMessageBox.warning(self, "ROI hiba", str(exc))
+            return
+
+        params  = self.auto_tab.get_match_params()
+        params["backend"] = backend
+        self.statusBar().showMessage(
+            f"ROI illesztés folyamatban  [{backend}]  "
+            f"A: {crop_a.shape[1]}×{crop_a.shape[0]}  "
+            f"B: {crop_b.shape[1]}×{crop_b.shape[0]}  px…")
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        try:
+            result = self._run_backend(crop_a, crop_b, params)
+            if result is None:
+                self.statusBar().showMessage("ROI illesztés megszakítva.")
+                return
+            pts_a_crop, pts_b_crop, device = result
+            if pts_a_crop is None or len(pts_a_crop) == 0:
+                self.statusBar().showMessage("ROI illesztés: nem találhatók pontpárok.")
+                return
+
+            # RANSAC szűrés a vágott koordinátákon
+            # (minimum 4 pont kell a homográfia becsléshez; kevesebb esetén
+            #  az összes egyezést megtartjuk szűrés nélkül)
+            if params.get("use_ransac", True) and len(pts_a_crop) >= 4:
+                try:
+                    pts_a_f, pts_b_f, _, _ = filter_matches_with_ransac(
+                        pts_a_crop, pts_b_crop,
+                        reproj_threshold=params.get("reproj_threshold", 4.0))
+                    if pts_a_f is None or len(pts_a_f) == 0:
+                        # RANSAC nem szűrt ki semmit – maradunk az eredetinél
+                        pts_a_f, pts_b_f = pts_a_crop, pts_b_crop
+                except Exception:
+                    # RANSAC hiba (pl. szinguláris mátrix) → szűrés nélkül
+                    pts_a_f, pts_b_f = pts_a_crop, pts_b_crop
+            else:
+                pts_a_f, pts_b_f = pts_a_crop, pts_b_crop
+
+            # Offset visszaadása az eredeti képkoord-rendszerbe
+            pts_a_full = pts_a_f + np.array([[off_ax, off_ay]], dtype=np.float64)
+            pts_b_full = pts_b_f + np.array([[off_bx, off_by]], dtype=np.float64)
+
+            self.editor_tab.point_editor._push_undo()
+
+            # delete_in_roi: meglévő párok törlése mindkét ROI-n belül
+            if delete_in_roi:
+                keep = []
+                for i, (pa, pb) in enumerate(zip(
+                        self.project.anchor_points_a,
+                        self.project.anchor_points_b)):
+                    in_a = roi_a.contains(pa[0], pa[1])
+                    in_b = roi_b.contains(pb[0], pb[1])
+                    if not (in_a and in_b):
+                        keep.append(i)
+                self.project.anchor_points_a = [
+                    self.project.anchor_points_a[i] for i in keep]
+                self.project.anchor_points_b = [
+                    self.project.anchor_points_b[i] for i in keep]
+
+            # Új pontpárok hozzáadása
+            self.project.anchor_points_a.extend(pts_a_full.tolist())
+            self.project.anchor_points_b.extend(pts_b_full.tolist())
+
+            self.editor_tab.refresh_views()
+            n_new = len(pts_a_full)
+            n_tot = len(self.project.anchor_points_a)
+            self.statusBar().showMessage(
+                f"ROI illesztés kész  –  +{n_new} új pár  |  összesen: {n_tot}  "
+                f"|  eszköz: {device}")
+
+        except Exception as exc:
+            QMessageBox.critical(self, "ROI illesztési hiba",
+                                 log_exception_text("Hiba:", exc))
+            self.statusBar().showMessage("ROI illesztés sikertelen.")
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -1422,16 +2653,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Mentési hiba", str(exc))
 
-    def load_project(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Projekt megnyitása", "", "ArchMorph projekt (*.json)")
-        if not path:
-            return
+    def _load_project_from_path(self, path: str) -> None:
+        """Belső segédmetódus: projektfájl betöltése a megadott elérési útról."""
         try:
             data = load_json_utf8(Path(path))
-            self.project.anchor_points_a  = data.get("points_a", [])
-            self.project.anchor_points_b  = data.get("points_b", [])
-            self.project.homography_matrix= data.get("homography")
+            self.project.anchor_points_a   = data.get("points_a", [])
+            self.project.anchor_points_b   = data.get("points_b", [])
+            self.project.homography_matrix = data.get("homography")
 
             for slot, key in [("A", "image_a"), ("B", "image_b")]:
                 img_path = data.get(key)
@@ -1453,6 +2681,12 @@ class MainWindow(QMainWindow):
                 f"({len(self.project.anchor_points_a)} pontpár)")
         except Exception as exc:
             QMessageBox.critical(self, "Betöltési hiba", str(exc))
+
+    def load_project(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Projekt megnyitása", "", "ArchMorph projekt (*.json)")
+        if path:
+            self._load_project_from_path(path)
 
 
 # ════════════════════════════════════════════════════════════════════════════
