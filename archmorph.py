@@ -204,6 +204,100 @@ def bgr_to_torch_image(image_bgr: np.ndarray, device: str):
 
 
 
+def crop_images_to_overlap(
+    img_a: np.ndarray,
+    img_b: np.ndarray,
+    pts_a: List[Tuple[float, float]],
+    pts_b: List[Tuple[float, float]],
+) -> Tuple[np.ndarray, np.ndarray,
+           List[Tuple[float, float]], List[Tuple[float, float]]]:
+    """
+    A két képet a közös, mindkettőn megjelenő területre vágja.
+
+    Algoritmusa:
+      1. Homográfiát számít a pontpárokból (A → B tér).
+      2. Az A kép érvényes pixeleit betérképezi B koordináta-rendszerébe.
+      3. Megkeresi a B képpel való metszet bounding box-ját.
+      4. B-t közvetlenül, A warpolt verzióját ugyanerre vágja.
+      5. A pontkoordinátákat az új képméretre frissíti.
+
+    Visszatér:
+      (img_a_out, img_b_out, new_pts_a, new_pts_b)
+      – mindkét kép azonos pixelméretű lesz
+      – csak azok a pontpárok maradnak, amelyek a vágott képen belül esnek
+    """
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+    if len(pts_a) < 4:
+        raise ValueError(
+            "A közös terület meghatározásához legalább 4 pontpár szükséges.\n"
+            "Adj hozzá több pontpárt, majd próbáld újra!")
+
+    h_a, w_a = img_a.shape[:2]
+    h_b, w_b = img_b.shape[:2]
+
+    # ── 1. Homográfia: A → B tér ──────────────────────────────────────────────
+    src = np.float32(pts_a).reshape(-1, 1, 2)
+    dst = np.float32(pts_b).reshape(-1, 1, 2)
+    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+    if H is None:
+        raise RuntimeError(
+            "Nem sikerült homográfiát számítani a pontpárokból.\n"
+            "Ellenőrizd, hogy a pontpárok valóban megfelelő helyeken vannak!")
+
+    # ── 2. A érvényes maszkjának vetítése B-be ────────────────────────────────
+    mask_a = np.ones((h_a, w_a), dtype=np.uint8) * 255
+    warped_mask = cv2.warpPerspective(mask_a, H, (w_b, h_b),
+                                      flags=cv2.INTER_NEAREST,
+                                      borderMode=cv2.BORDER_CONSTANT,
+                                      borderValue=0)
+
+    # ── 3. Közös terület bounding box-a B terében ─────────────────────────────
+    ys, xs = np.where(warped_mask > 128)
+    if len(xs) == 0:
+        raise RuntimeError(
+            "A homográfia alapján a két képnek nincs átfedő területe.\n"
+            "Ellenőrizd a pontpárokat!")
+
+    x1 = max(0,   int(xs.min()))
+    x2 = min(w_b, int(xs.max()) + 1)
+    y1 = max(0,   int(ys.min()))
+    y2 = min(h_b, int(ys.max()) + 1)
+
+    if (x2 - x1) < 10 or (y2 - y1) < 10:
+        raise RuntimeError("Az átfedő terület túl kicsi a vágáshoz.")
+
+    # ── 4. A warpolt változata, majd vágás ────────────────────────────────────
+    warped_a  = cv2.warpPerspective(img_a, H, (w_b, h_b),
+                                    flags=cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT,
+                                    borderValue=(0, 0, 0))
+    img_a_out = warped_a[y1:y2, x1:x2].copy()
+    img_b_out = img_b   [y1:y2, x1:x2].copy()
+
+    # ── 5. Pontkoordináták frissítése ─────────────────────────────────────────
+    # pts_b: egyszerű eltolás (x-x1, y-y1)
+    # pts_a: H-val B-be transzformálva, majd ugyanaz az eltolás
+
+    pts_a_np = np.float32(pts_a).reshape(-1, 1, 2)
+    pts_a_in_b = cv2.perspectiveTransform(pts_a_np, H).reshape(-1, 2)
+
+    new_pts_a: List[Tuple[float, float]] = []
+    new_pts_b: List[Tuple[float, float]] = []
+
+    crop_w, crop_h = x2 - x1, y2 - y1
+    for (ax, ay), (bx, by) in zip(pts_a_in_b, pts_b):
+        nax, nay = ax - x1, ay - y1
+        nbx, nby = bx - x1, by - y1
+        # Csak azok a párok maradnak, amelyek mindkét oldalon a képen belül esnek
+        if (0 <= nax < crop_w and 0 <= nay < crop_h and
+                0 <= nbx < crop_w and 0 <= nby < crop_h):
+            new_pts_a.append((float(nax), float(nay)))
+            new_pts_b.append((float(nbx), float(nby)))
+
+    return img_a_out, img_b_out, new_pts_a, new_pts_b
+
+
 def _validate_anchor_points(pts_a, pts_b) -> tuple:
     """Validate and return clean (pts_a, pts_b) or raise ValueError."""
     if not isinstance(pts_a, list) or not isinstance(pts_b, list):
@@ -2279,6 +2373,77 @@ class MainWindow(QMainWindow):
 
         tb.addAction(act_save)
         tb.addAction(act_open)
+        tb.addSeparator()
+
+        act_crop = QAction(tr("✂  Közös terület"), self)
+        act_crop.setToolTip(
+            tr("Mindkét képet a közös, átfedő területre vágja.\n"
+               "A kép A homográfiával B koordinátájába vetítődik,\n"
+               "majd mindkettő a metszet-területre kerül vágásra.\n"
+               "Szükséges: legalább 4 pontpár."))
+        act_crop.triggered.connect(self._crop_to_overlap)
+        tb.addAction(act_crop)
+
+    def _crop_to_overlap(self) -> None:
+        """Mindkét képet a homográfia alapján számított közös területre vágja."""
+        if self.project.image_a is None or self.project.image_b is None:
+            QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
+            return
+        n = len(self.project.anchor_points_a)
+        if n < 4:
+            QMessageBox.warning(
+                self, tr("Kevés pontpár"),
+                tr("A közös terület meghatározásához legalább 4 pontpár szükséges.\n"
+                   f"Jelenleg: {n} pár.  Adj hozzá több pontpárt, majd próbáld újra!"))
+            return
+
+        ans = QMessageBox.question(
+            self, tr("Közös terület vágása"),
+            tr("Ez a művelet mindkét képet a közös átfedő területre vágja,\n"
+               "és a pontpárokat az új képmérethez igazítja.\n\n"
+               "Az eredeti képek a projekt-fájlban visszaállíthatók.\n\n"
+               "Folytatod?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            img_a_out, img_b_out, new_pts_a, new_pts_b = crop_images_to_overlap(
+                self.project.image_a,
+                self.project.image_b,
+                [(float(p[0]), float(p[1])) for p in self.project.anchor_points_a],
+                [(float(p[0]), float(p[1])) for p in self.project.anchor_points_b],
+            )
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, tr("Vágási hiba"), str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        # Undo mentés (kézzel)
+        self.editor_tab.point_editor._push_undo()
+
+        # Projekt frissítése
+        self.project.image_a           = img_a_out
+        self.project.image_b           = img_b_out
+        self.project.anchor_points_a   = [list(p) for p in new_pts_a]
+        self.project.anchor_points_b   = [list(p) for p in new_pts_b]
+        # Elmentett illesztési nyers adatok törlése (már nem érvényes koordinátán)
+        self.project.raw_matches_a     = []
+        self.project.raw_matches_b     = []
+        self.project.raw_inlier_mask   = []
+
+        # UI frissítése
+        self.editor_tab.load_images()
+        self.editor_tab.refresh_views()
+
+        h, w = img_a_out.shape[:2]
+        n_pairs = len(new_pts_a)
+        self.statusBar().showMessage(
+            tr("✂  Vágás kész  –  ") +
+            f"{w}×{h} px  |  {n_pairs} " + tr("pontpár megmaradt"))
 
     def _apply_dark_theme(self) -> None:
         self.setStyleSheet("""
