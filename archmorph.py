@@ -83,6 +83,13 @@ try:
 except ImportError:
     def cfg(key, default):  return default   # type: ignore[misc]
 
+try:
+    from config_editor import ConfigEditorTab
+    _HAS_CONFIG_EDITOR = True
+except ImportError:
+    ConfigEditorTab = None  # type: ignore[assignment,misc]
+    _HAS_CONFIG_EDITOR = False
+
 APP_NAME    = "ArchMorph Professional"
 APP_VERSION = "0.5.0"
 
@@ -677,9 +684,16 @@ def generate_morph_frames_triangle(
           for i in range(len(pa))]
 
     # Delaunay-triangulálás
-    subdiv = cv2.Subdiv2D((0, 0, w, h))
+    # A téglalapot 2 pixellel bővítjük minden irányban, hogy a kerekítés
+    # és határpont-eltolás miatt kívülre eső pontok ne okozzanak
+    # cv::Subdiv2D::locate hibát (-211: out of range).
+    _M = 2
+    subdiv = cv2.Subdiv2D((-_M, -_M, w + _M, h + _M))
     for p in pm:
-        subdiv.insert((float(p[0]), float(p[1])))
+        # Pontokat is szorítjuk a kiterjesztett tartományba (biztonság kedvéért)
+        px = float(max(-_M + 1, min(w + _M - 1, p[0])))
+        py = float(max(-_M + 1, min(h + _M - 1, p[1])))
+        subdiv.insert((px, py))
     tri_list = subdiv.getTriangleList().astype(np.int32)
 
     # Koordináta → index leképezés
@@ -2061,6 +2075,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.editor_tab,  "✏️  Pontszerkesztő")
         self.tabs.addTab(self.preview_tab, "🔍  Előnézet")
         self.tabs.addTab(self.export_tab,  "🎬  Export")
+
+        if _HAS_CONFIG_EDITOR:
+            self.settings_tab = ConfigEditorTab(self)
+            self.tabs.addTab(self.settings_tab, "⚙  Beállítások")
 
     def _build_menu(self) -> None:
         mb = self.menuBar()

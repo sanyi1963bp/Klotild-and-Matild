@@ -1,0 +1,222 @@
+# ArchMorph Professional – konfigurációs fájl
+# Generálva a vizuális szerkesztővel.
+# Teljes dokumentáció: archmorph_config.toml (eredeti sablon)
+
+
+[ui.colors.points]
+# Pontok – Körvonal
+# Nem kijelölt pont körének vonalszíne.
+normal = "#ff8a3d"
+# Éppen kiválasztott pont (kereszthajszal jelenik meg).
+active = "#ff3333"
+# Gumiszalag-kerettel egyszerre kijelölt pontok.
+multi = "#44aaff"
+# Pontok mellé rajzolt sorszám felirat normál állapotban.
+text = "#ffffff"
+# Sorszám felirat az aktív pont mellett.
+text_active = "#ffcccc"
+
+[ui.colors.points.fill]
+# Pontok – Belső kitöltés (RGBA)
+# Nem kijelölt pont belső kitöltése. A = átlátszatlanság (0–255).
+normal_rgba = [255, 138, 61, 70]
+# Aktív pont belső kitöltése.
+active_rgba = [255, 51, 51, 150]
+# Multi-kijelölt pont belső kitöltése.
+multi_rgba = [68, 170, 255, 90]
+
+[ui.colors.roi]
+# ROI – Keresési ablak
+# ROI téglalap keretének vonalszíne. Ctrl+húzással rajzolható.
+border = "#ff00ff"
+# A 8 átméretező fogópont kitöltési színe.
+handle = "#ffffff"
+# ROI belső áttetsző kitöltése.
+fill_rgba = [255, 153, 0, 22]
+# ROI-n kívüli terület elsötétítő réteg.
+outside_rgba = [0, 0, 0, 90]
+
+[ui.colors.canvas]
+# Vászon háttér
+# Vászon háttérszíne (kép mögötti terület).
+background = "#1a1f24"
+# Vászon keretes kerete.
+border = "#343b45"
+# 'Nincs kép betöltve' szöveg és vázlat szín.
+placeholder = "#4a5260"
+
+[ui.colors.rband]
+# Gumiszalag-keret (húzásos kijelölés)
+# Bal gomb + húzás: pontokat kijelölő szaggatott keret.
+selection = "#88bbff"
+# Ctrl + húzás: ROI-t rajzoló szaggatott keret.
+roi = "#ffcc44"
+
+[ui.colors.polygon]
+# Sokszög-ROI
+# Sokszög rajzolás közben (még nem lezárt).
+draw = "#ffb300"
+# Lezárt sokszög (helyi menü aktív állapot).
+done = "#ff6f00"
+# Sokszög belsejének áttetsző kitöltése.
+fill_rgba = [255, 179, 0, 35]
+
+[ui.colors.preview]
+# Export előnézet
+# Az export előnézet vászon háttérszíne.
+background = "#0d1117"
+
+[ui.colors.theme]
+# UI Téma – Globális sötét téma
+# Főablak háttérszíne.
+window_bg = "#1a1f24"
+# Panelek, fülek, beviteli mezők háttere.
+panel_bg = "#252a33"
+# Állapotsor + eszköztár háttere.
+statusbar_bg = "#111418"
+# Gombok alap háttere.
+button_bg = "#2c3340"
+# Gombok hover állapota.
+button_hover = "#3a4252"
+# QSpinBox, QComboBox, QLineEdit háttere.
+input_bg = "#252a33"
+# Elválasztó vonalak, csoportdoboz-keretek.
+separator = "#343b45"
+# Elsődleges szövegszín.
+text_main = "#d7dde5"
+# Halkított szöveg (állapotsor, kis feliratok).
+text_dim = "#888888"
+# QLabel feliratok.
+text_label = "#aaaaaa"
+# QGroupBox fejléc szöveg.
+group_title = "#99aaaa"
+# 'Újragenerálás szükséges' gomb háttere.
+stale_bg = "#5a3800"
+# 'Újragenerálás szükséges' gomb kerete.
+stale_border = "#e8a020"
+# 'Újragenerálás szükséges' gomb szövege.
+stale_text = "#ffcc66"
+
+[ui.sizes]
+# Méretek (pixel)
+# Nem kijelölt pont körének sugara px-ben.
+point_radius_normal = 6
+# Aktív (kijelölt) pont körének sugara px-ben.
+point_radius_active = 10
+# Multi-kijelölt pont körének sugara px-ben.
+point_radius_multi = 8
+# Ennél közelebb kattintva a pont kijelölődik. Nagyobb = könnyebb kattintani.
+point_hit_radius = 14
+# ROI átméretező fogópontok körének sugara px-ben.
+roi_handle_radius = 6
+# Ennél kisebb Ctrl+húzás figyelmen kívül marad.
+roi_min_size = 10
+
+[match.superpoint]
+# SuperPoint + LightGlue
+# Több → pontosabb, de lassabb és több GPU-memória. (cvg/LightGlue alapértelmezett: 4096)
+max_keypoints = 4096
+# Kisebb → több gyengébb pont; nagyobb → kevesebb, erősebb. (SuperPoint official: 0.005)
+detection_threshold = 0.005
+# Non-Maximum Suppression: pontok legalább ennyi px-re legyenek egymástól. (DeTone 2018: 4)
+nms_radius = 4
+# LightGlue szűrési küszöb – kisebb → szigorúbb. (LightGlue alapértelmezett: 0.1)
+match_threshold = 0.1
+# Korai leállás küszöb – ha megbízható → gyorsabb futás. (ICCV 2023: 0.95)
+depth_confidence = 0.95
+# Korai leállás küszöb szélesség irányban. (ICCV 2023: 0.99)
+width_confidence = 0.99
+
+[match.disk]
+# DISK + LightGlue
+# DISK sűrűbben mintavételez – magasabb érték ajánlott. (DeDoDe/kornia: ~5000–10000)
+max_keypoints = 5000
+# LightGlue szűrési küszöb. (LightGlue alapértelmezett: 0.1)
+match_threshold = 0.1
+
+[match.loftr]
+# LoFTR
+# outdoor: épületek, terek, tájak  |  indoor: szobák, belső terek.
+pretrained = "outdoor"
+# Csak ennél megbízhatóbb egyezések maradnak. (paper: 0.2; morfinghoz: 0.5)
+conf_threshold = 0.5
+
+[match.sift]
+# SIFT
+# 0 = korlátlan (Lowe 2004 + OpenCV alapértelmezettje). Nagy képnél: 2000–5000.
+max_keypoints = 0
+# Gauss-skálatér oktávonkénti rétegei. (Lowe 2004: s=3) – általában ne változtasd.
+octave_layers = 3
+# Kisebb → több gyenge pont; nagyobb → csak erős. (Lowe 2004: 0.04)
+contrast_threshold = 0.04
+# Él-jellegű instabil pontok szűrése. (Lowe 2004: r=10)
+edge_threshold = 10.0
+# Gauss-simítás sigma értéke. (Lowe 2004: σ=1.6) – általában ne változtasd.
+sigma = 1.6
+# Kisebb → szigorúbb; 0.80 = Lowe 2004 optimuma ('90% hamis egyezés kiszűrve').
+ratio_threshold = 0.8
+
+[match.ransac]
+# RANSAC – Geometriai szűrő
+# Geometriai outlier-szűrő. Erősen ajánlott bekapcsolva hagyni.
+enabled = true
+# Visszavetítési küszöb px-ben. Kisebb → szigorúbb. (OpenCV alapértelmezett: 3.0 px)
+reproj_threshold = 3.0
+
+[export.defaults]
+# Export alapértelmezések
+# Több → simább animáció, de lassabb generálás és nagyobb fájl.
+frame_count = 40
+# Lejátszási sebesség. MP4: 24/25/30. GIF: max ~50 fps.
+fps = 25.0
+# Alapértelmezett morph módszer az Export lapfülön.
+method = "Delaunay háromszög"
+# Alapértelmezett animáció-sebességgörbe.
+easing = "S-görbe"
+# A→B→A hurok: az animáció visszafelé is lejátszik.
+ping_pong = true
+
+[flow.presets.fast]
+# Optikai folyam – Gyors preset
+# Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis.
+pyr_scale = 0.5
+# Több szint → nagyobb elmozdulás is nyomozható.
+levels = 3
+# Átlagolási ablak. Nagyobb → robusztusabb, de elmosódottabb. (OpenCV tutorial: 15)
+winsize = 15
+# Iterációk száma szintenként. Több → pontosabb, lassabb.
+iterations = 3
+# Polinomexpanzió szomszédsága. 5 = gyors; 7 = simább (Farneback 2003).
+poly_n = 5
+# poly_n=5 → 1.1; poly_n=7 → 1.5 ajánlott (Farneback 2003).
+poly_sigma = 1.1
+
+[flow.presets.normal]
+# Optikai folyam – Normál preset
+# Piramis arány
+pyr_scale = 0.5
+# Piramisszintek
+levels = 4
+# Ablakméret (px)
+winsize = 21
+# Iterációk
+iterations = 4
+# Poly N
+poly_n = 7
+# poly_n=7 esetén 1.5 ajánlott (Farneback 2003).
+poly_sigma = 1.5
+
+[flow.presets.detailed]
+# Optikai folyam – Részletes preset
+# Piramis arány
+pyr_scale = 0.5
+# Piramisszintek
+levels = 5
+# Ablakméret (px)
+winsize = 33
+# Iterációk
+iterations = 5
+# Poly N
+poly_n = 7
+# poly_n=7 esetén 1.5 ajánlott (Farneback 2003).
+poly_sigma = 1.5
