@@ -90,6 +90,14 @@ except ImportError:
     ConfigEditorTab = None  # type: ignore[assignment,misc]
     _HAS_CONFIG_EDITOR = False
 
+
+try:
+    from TRANSLATIONS import tr, set_language, get_language
+except ImportError:
+    def tr(text: str) -> str: return text
+    def set_language(lang: str) -> None: pass
+    def get_language() -> str: return "hu"
+
 APP_NAME    = "ArchMorph Professional"
 APP_VERSION = "0.5.0"
 
@@ -116,7 +124,7 @@ class AppSettings:
     ransac_reproj_threshold: float = 4.0
     display_match_limit:     int   = 150
     overlay_alpha:           float = 0.50
-    alignment_view_mode:     str   = "Overlay"
+    alignment_view_mode:     str   = tr("Overlay")
     force_cpu_matching:      bool  = False
     auto_fallback_to_cpu:    bool  = True
 
@@ -193,6 +201,26 @@ def bgr_to_torch_image(image_bgr: np.ndarray, device: str):
     tensor = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
     return tensor.to(device)
 
+
+
+
+def _validate_anchor_points(pts_a, pts_b) -> tuple:
+    """Validate and return clean (pts_a, pts_b) or raise ValueError."""
+    if not isinstance(pts_a, list) or not isinstance(pts_b, list):
+        raise ValueError("Point lists must be lists.")
+    if len(pts_a) != len(pts_b):
+        raise ValueError(f"Point list length mismatch: {len(pts_a)} vs {len(pts_b)}")
+    clean_a, clean_b = [], []
+    for i, (pa, pb) in enumerate(zip(pts_a, pts_b)):
+        if not (isinstance(pa, (list,tuple)) and len(pa)==2 and
+                all(isinstance(v,(int,float)) for v in pa)):
+            raise ValueError(f"Invalid point A[{i}]: {pa}")
+        if not (isinstance(pb, (list,tuple)) and len(pb)==2 and
+                all(isinstance(v,(int,float)) for v in pb)):
+            raise ValueError(f"Invalid point B[{i}]: {pb}")
+        clean_a.append((float(pa[0]), float(pa[1])))
+        clean_b.append((float(pb[0]), float(pb[1])))
+    return clean_a, clean_b
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Illesztési algoritmusok
@@ -336,7 +364,7 @@ def run_loftr(
     image_b_bgr: np.ndarray,
     *,
     force_cpu:            bool  = False,
-    pretrained:           str   = "outdoor",
+    pretrained:           str   = tr("outdoor"),
     confidence_threshold: float = 0.5,
     **_,
 ) -> Tuple[np.ndarray, np.ndarray, str]:
@@ -346,7 +374,7 @@ def run_loftr(
     vagy erősen deformált képpárokon (pl. historikus + modern fotó).
 
     Telepítés: pip install kornia
-    pretrained: "outdoor" (épületek, utcák) vagy "indoor" (belső terek)
+    pretrained: tr("outdoor") (épületek, utcák) vagy tr("indoor") (belső terek)
     """
     if torch is None:
         raise RuntimeError("A PyTorch nincs telepítve.")
@@ -890,7 +918,7 @@ class AlignmentPreviewCanvas(QWidget):
         self.setMinimumHeight(240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._img        = None
-        self._view_mode  = "Overlay"
+        self._view_mode  = tr("Overlay")
         self._all_imgs: Dict[str, Any] = {}   # mindhárom mód képe tárolva
 
     def sizeHint(self) -> QSize:
@@ -898,7 +926,7 @@ class AlignmentPreviewCanvas(QWidget):
 
     def set_images(self, target, warped, overlay) -> None:
         """Mindhárom nézet képét eltárolja; az aktív módot azonnal mutatja."""
-        self._all_imgs = {"Célkép": target, "Warpolt A": warped, "Overlay": overlay}
+        self._all_imgs = {tr("Célkép"): target, tr("Warpolt A"): warped, tr("Overlay"): overlay}
         self._img = self._all_imgs.get(self._view_mode, overlay)
         self.update()
 
@@ -1079,8 +1107,8 @@ class AutomaticModeTab(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
 
         self.lf_pretrained = QComboBox()
-        self.lf_pretrained.addItems(["outdoor", "indoor"])
-        self.lf_pretrained.setCurrentText(cfg("match.loftr.pretrained", "outdoor"))
+        self.lf_pretrained.addItems([tr("outdoor"), tr("indoor")])
+        self.lf_pretrained.setCurrentText(cfg("match.loftr.pretrained", tr("outdoor")))
         self._add_row(form, "Előtanított modell:", self.lf_pretrained,
             "Az előre tanított LoFTR modell típusa.\n\n"
             "'outdoor' (kültéri): épületek, utcák, terek, tájképek, műemlékek.\n"
@@ -1250,7 +1278,7 @@ class AutomaticModeTab(QWidget):
         root.setSpacing(8)
 
         # ── Backend választó ──────────────────────────────────────────────
-        backend_box  = QGroupBox("Illesztési algoritmus (backend)")
+        backend_box  = QGroupBox(tr("Illesztési algoritmus (backend)"))
         backend_form = QFormLayout(backend_box)
 
         self.matcher_combo = QComboBox()
@@ -1274,7 +1302,7 @@ class AutomaticModeTab(QWidget):
         root.addWidget(backend_box)
 
         # ── Per-backend paraméter-panelek ─────────────────────────────────
-        params_box  = QGroupBox("Backend paraméterek")
+        params_box  = QGroupBox(tr("Backend paraméterek"))
         params_vbox = QVBoxLayout(params_box)
 
         self._stack = QStackedWidget()
@@ -1287,7 +1315,7 @@ class AutomaticModeTab(QWidget):
         root.addWidget(params_box)
 
         # ── Közös beállítások (RANSAC + CPU) ──────────────────────────────
-        common_box  = QGroupBox("Közös beállítások")
+        common_box  = QGroupBox(tr("Közös beállítások"))
         common_vbox = QVBoxLayout(common_box)
         common_vbox.addWidget(self._panel_common())
         root.addWidget(common_box)
@@ -1413,8 +1441,24 @@ class AdvancedEditorTab(QWidget):
 
     def _on_points_changed(self) -> None:
         """Pont hozzáadás/törlés/mozgatás esetén hívódik meg."""
-        # (Opcionális: itt lehetne pl. live preview triggerelni.)
-        pass
+        # Update the point pair count display in the editor
+        num_pairs = len(self.editor.editor.points_a) if hasattr(self, 'editor') and hasattr(self.editor, 'editor') else 0
+        
+        # Update the parent window's status bar if accessible
+        try:
+            # Try to access the main window through parent hierarchy
+            parent = self.parent()
+            while parent and not hasattr(parent, 'statusBar'):
+                parent = parent.parent()
+            if parent and hasattr(parent, 'statusBar'):
+                parent.statusBar().showMessage(
+                    f"{num_pairs} " + tr("pontpár"))
+        except:
+            pass
+        
+        # Mark cached morph frames as stale (invalidate preview)
+        if hasattr(self, 'preview_canvas'):
+            self.preview_canvas = None
 
 
 class PreviewTab(QWidget):
@@ -1429,15 +1473,15 @@ class PreviewTab(QWidget):
 
         form = QFormLayout()
         self.view_combo = QComboBox()
-        self.view_combo.addItems(["Overlay", "Célkép", "Warpolt A"])
+        self.view_combo.addItems([tr("Overlay"), tr("Célkép"), tr("Warpolt A")])
 
         self.alpha_spin = QDoubleSpinBox()
         self.alpha_spin.setRange(0.0, 1.0)
         self.alpha_spin.setSingleStep(0.05)
         self.alpha_spin.setValue(self.settings.overlay_alpha)
 
-        form.addRow("Nézet:",         self.view_combo)
-        form.addRow("Átlátszóság:",   self.alpha_spin)
+        form.addRow(tr("Nézet:"),         self.view_combo)
+        form.addRow(tr("Átlátszóság:"),   self.alpha_spin)
 
         root.addWidget(self.preview_canvas, stretch=1)
         root.addLayout(form)
@@ -1595,7 +1639,7 @@ class ExportTab(QWidget):
         cfg_row.setSpacing(16)
 
         # Képkockák száma
-        grp_frames = QGroupBox("Képkockák")
+        grp_frames = QGroupBox(tr("Képkockák"))
         fl = QFormLayout(grp_frames)
         fl.setContentsMargins(8, 12, 8, 8)
 
@@ -1619,7 +1663,7 @@ class ExportTab(QWidget):
         cfg_row.addWidget(grp_frames)
 
         # ── Módszer + per-módszer beállítások (QStackedWidget) ────────────────
-        grp_method = QGroupBox("Morph módszer")
+        grp_method = QGroupBox(tr("Morph módszer"))
         ml = QVBoxLayout(grp_method)
         ml.setContentsMargins(8, 12, 8, 8)
         ml.setSpacing(6)
@@ -1657,8 +1701,8 @@ class ExportTab(QWidget):
         fl_flow = QFormLayout(pan_flow)
         fl_flow.setContentsMargins(0, 4, 0, 0)
         self._combo_flow_quality = QComboBox()
-        self._combo_flow_quality.addItems(["Gyors", "Normál", "Részletes"])
-        self._combo_flow_quality.setCurrentText("Normál")
+        self._combo_flow_quality.addItems([tr("Gyors"), tr("Normál"), tr("Részletes")])
+        self._combo_flow_quality.setCurrentText(tr("Normál"))
         self._combo_flow_quality.setToolTip(
             "Farneback optikai folyam (cv2.calcOpticalFlowFarneback) előbeállítások.\n\n"
             "Gyors  – winsize=15, levels=3, poly_n=5, σ=1.1, iter=3\n"
@@ -1692,7 +1736,7 @@ class ExportTab(QWidget):
         cfg_row.addWidget(grp_method)
 
         # ── Easing + ping-pong ────────────────────────────────────────────────
-        grp_ease = QGroupBox("Animáció")
+        grp_ease = QGroupBox(tr("Animáció"))
         el = QFormLayout(grp_ease)
         el.setContentsMargins(8, 12, 8, 8)
 
@@ -1716,7 +1760,7 @@ class ExportTab(QWidget):
         cfg_row.addWidget(grp_ease)
 
         # ── Generálás gomb ────────────────────────────────────────────────────
-        grp_gen = QGroupBox("Generálás")
+        grp_gen = QGroupBox(tr("Generálás"))
         gl = QVBoxLayout(grp_gen)
         gl.setContentsMargins(8, 12, 8, 8)
         self._btn_generate = QPushButton("⚙  Képkockák generálása")
@@ -1851,7 +1895,7 @@ class ExportTab(QWidget):
     # Értékek a konfigfájlból olvasódnak; ha nincs konfigfájl, a beépített
     # értékek maradnak (OpenCV tutorial + Farneback 2003 ajánlások alapján).
     _FLOW_PARAMS = {
-        "Gyors": dict(
+        tr("Gyors"): dict(
             pyr_scale  = cfg("flow.presets.fast.pyr_scale",  0.5),
             levels     = cfg("flow.presets.fast.levels",     3),
             winsize    = cfg("flow.presets.fast.winsize",    15),
@@ -1859,7 +1903,7 @@ class ExportTab(QWidget):
             poly_n     = cfg("flow.presets.fast.poly_n",     5),
             poly_sigma = cfg("flow.presets.fast.poly_sigma", 1.1),
         ),
-        "Normál": dict(
+        tr("Normál"): dict(
             pyr_scale  = cfg("flow.presets.normal.pyr_scale",  0.5),
             levels     = cfg("flow.presets.normal.levels",     4),
             winsize    = cfg("flow.presets.normal.winsize",    21),
@@ -1867,7 +1911,7 @@ class ExportTab(QWidget):
             poly_n     = cfg("flow.presets.normal.poly_n",     7),
             poly_sigma = cfg("flow.presets.normal.poly_sigma", 1.5),
         ),
-        "Részletes": dict(
+        tr("Részletes"): dict(
             pyr_scale  = cfg("flow.presets.detailed.pyr_scale",  0.5),
             levels     = cfg("flow.presets.detailed.levels",     5),
             winsize    = cfg("flow.presets.detailed.winsize",    33),
@@ -1880,9 +1924,9 @@ class ExportTab(QWidget):
     def _generate(self) -> None:
         if not hasattr(self, "_img_a") or self._img_a is None:
             QMessageBox.information(
-                self, "Nincs adat",
-                "Nincs elérhető illesztési adat.\n"
-                "Futtass előbb automatikus illesztést!")
+                self, tr("Nincs adat"),
+                tr("Nincs elérhető illesztési adat.\n"
+                "Futtass előbb automatikus illesztést!"))
             return
 
         n        = self._spin_frames.value()
@@ -1890,7 +1934,7 @@ class ExportTab(QWidget):
         pingpong = self._chk_pingpong.isChecked()
         method   = self._combo_method.currentText()
 
-        prog = QProgressDialog("Képkockák generálása…", None, 0, 0, self)
+        prog = QProgressDialog(tr("Képkockák generálása…"), None, 0, 0, self)
         prog.setWindowTitle("ArchMorph")
         prog.setWindowModality(Qt.WindowModality.WindowModal)
         prog.setMinimumDuration(300)
@@ -1911,7 +1955,7 @@ class ExportTab(QWidget):
 
             elif method == "Optikai folyam":
                 quality = self._combo_flow_quality.currentText()
-                fp = self._FLOW_PARAMS.get(quality, self._FLOW_PARAMS["Normál"])
+                fp = self._FLOW_PARAMS.get(quality, self._FLOW_PARAMS[tr("Normál")])
                 self._frames = generate_morph_frames_flow(
                     self._img_a, self._img_b,
                     n_frames=n, easing=easing, ping_pong=pingpong,
@@ -1940,7 +1984,7 @@ class ExportTab(QWidget):
                 f"  |  {method_short}")
 
         except Exception as exc:
-            QMessageBox.critical(self, "Generálási hiba", str(exc))
+            QMessageBox.critical(self, tr("Generálási hiba"), str(exc))
         finally:
             prog.close()
 
@@ -1989,30 +2033,30 @@ class ExportTab(QWidget):
         if not self._frames:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "MP4 mentése", "morph_animation.mp4",
-            "MP4 videó (*.mp4);;Minden fájl (*)")
+            self, tr("MP4 mentése"), "morph_animation.mp4",
+            tr("MP4 videó (*.mp4);;Minden fájl (*)"))
         if not path:
             return
         try:
             export_mp4(self._frames, path, fps=self._spin_fps.value())
-            self._lbl_export_status.setText(f"MP4 elmentve: {Path(path).name}")
+            self._lbl_export_status.setText(tr("MP4 elmentve: ") + f"{Path(path).name}")
         except Exception as exc:
-            QMessageBox.critical(self, "MP4 export hiba", str(exc))
+            QMessageBox.critical(self, tr("MP4 export hiba"), str(exc))
 
     def _export_gif(self) -> None:
         if not self._frames:
             return
         gif_fps = min(self._spin_fps.value(), 50.0)  # GIF max ~50 fps
         path, _ = QFileDialog.getSaveFileName(
-            self, "GIF mentése", "morph_animation.gif",
-            "Animált GIF (*.gif);;Minden fájl (*)")
+            self, tr("GIF mentése"), "morph_animation.gif",
+            tr("Animált GIF (*.gif);;Minden fájl (*)"))
         if not path:
             return
         try:
             export_gif(self._frames, path, fps=gif_fps)
-            self._lbl_export_status.setText(f"GIF elmentve: {Path(path).name}")
+            self._lbl_export_status.setText(tr("GIF elmentve: ") + f"{Path(path).name}")
         except Exception as exc:
-            QMessageBox.critical(self, "GIF export hiba", str(exc))
+            QMessageBox.critical(self, tr("GIF export hiba"), str(exc))
 
     def _export_png(self) -> None:
         if not self._frames:
@@ -2026,7 +2070,7 @@ class ExportTab(QWidget):
             self._lbl_export_status.setText(
                 f"{len(self._frames)} PNG elmentve → {Path(folder).name}/")
         except Exception as exc:
-            QMessageBox.critical(self, "PNG export hiba", str(exc))
+            QMessageBox.critical(self, tr("PNG export hiba"), str(exc))
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2038,6 +2082,13 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        # Load language preference and initialize UI language
+        try:
+            lang = cfg("ui.language", "hu")
+            set_language(lang)
+        except:
+            set_language("hu")
+        
         self.settings = AppSettings()
         self.project  = ProjectState()
         self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
@@ -2047,7 +2098,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_menu()
         self._apply_dark_theme()
-        self.statusBar().showMessage("Kész.")
+        self.statusBar().showMessage(tr("Kész."))
 
     # ── UI felépítése ────────────────────────────────────────────────────────
 
@@ -2071,38 +2122,38 @@ class MainWindow(QMainWindow):
         self.editor_tab.point_editor.image_b_drop_requested.connect(
             lambda p: self._load_image_from_path(p, "B"))
 
-        self.tabs.addTab(self.auto_tab,    "⚡  Automata illesztés")
-        self.tabs.addTab(self.editor_tab,  "✏️  Pontszerkesztő")
-        self.tabs.addTab(self.preview_tab, "🔍  Előnézet")
-        self.tabs.addTab(self.export_tab,  "🎬  Export")
+        self.tabs.addTab(self.auto_tab,    tr("⚡  Automata illesztés"))
+        self.tabs.addTab(self.editor_tab,  tr("✏️  Pontszerkesztő"))
+        self.tabs.addTab(self.preview_tab, tr("🔍  Előnézet"))
+        self.tabs.addTab(self.export_tab,  tr("🎬  Export"))
 
         if _HAS_CONFIG_EDITOR:
             self.settings_tab = ConfigEditorTab(self)
-            self.tabs.addTab(self.settings_tab, "⚙  Beállítások")
+            self.tabs.addTab(self.settings_tab, tr("⚙  Beállítások"))
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
 
         # Fájl menü
-        file_menu = mb.addMenu("Fájl")
+        file_menu = mb.addMenu(tr("Fájl"))
 
-        act_load_a = QAction("Kép A betöltése…", self)
+        act_load_a = QAction(tr("Kép A betöltése…"), self)
         act_load_a.setShortcut("Ctrl+1")
         act_load_a.triggered.connect(lambda: self.load_image("A"))
 
-        act_load_b = QAction("Kép B betöltése…", self)
+        act_load_b = QAction(tr("Kép B betöltése…"), self)
         act_load_b.setShortcut("Ctrl+2")
         act_load_b.triggered.connect(lambda: self.load_image("B"))
 
-        act_save = QAction("Projekt mentése…", self)
+        act_save = QAction(tr("Projekt mentése…"), self)
         act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self.save_project)
 
-        act_load = QAction("Projekt megnyitása…", self)
+        act_load = QAction(tr("Projekt megnyitása…"), self)
         act_load.setShortcut("Ctrl+O")
         act_load.triggered.connect(self.load_project)
 
-        act_quit = QAction("Kilépés", self)
+        act_quit = QAction(tr("Kilépés"), self)
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
 
@@ -2113,17 +2164,28 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_quit)
 
         # Szerkesztés menü
-        edit_menu = mb.addMenu("Szerkesztés")
+        edit_menu = mb.addMenu(tr("Szerkesztés"))
 
-        act_undo = QAction("Visszavonás", self)
+        act_undo = QAction(tr("Visszavonás"), self)
         act_undo.setShortcut("Ctrl+Z")
         act_undo.triggered.connect(self._on_undo)
         edit_menu.addAction(act_undo)
         edit_menu.addSeparator()
 
-        act_clear_pts = QAction("Összes pontpár törlése", self)
+        act_clear_pts = QAction(tr("Összes pontpár törlése"), self)
         act_clear_pts.triggered.connect(self.clear_all_points)
         edit_menu.addAction(act_clear_pts)
+
+        # Nyelv / Language menü
+        lang_menu = mb.addMenu(tr("Language / Nyelv"))
+
+        act_hu = QAction(tr("Magyar"), self)
+        act_hu.triggered.connect(lambda: self._set_ui_language("hu"))
+        lang_menu.addAction(act_hu)
+
+        act_en = QAction(tr("English"), self)
+        act_en.triggered.connect(lambda: self._set_ui_language("en"))
+        lang_menu.addAction(act_en)
 
     # ── Drag & drop (főablak) ────────────────────────────────────────────────
 
@@ -2163,24 +2225,43 @@ class MainWindow(QMainWindow):
                 )
         event.acceptProposedAction()
 
+    def _set_ui_language(self, lang: str) -> None:
+        """Set the UI language and save to config."""
+        try:
+            set_language(lang)
+            # Save language preference to config
+            try:
+                from archmorph_config_loader import save_config
+                save_config("ui.language", lang)
+            except:
+                pass
+            # Show restart message
+            QMessageBox.information(
+                self, 
+                tr("Nyelv módosítva / Language Changed"),
+                tr("Az alkalmazás újraindítása szükséges a változások érvényre juttatásához.\n\n") +
+                "Application restart required for changes to take effect.")
+        except Exception as e:
+            QMessageBox.warning(self, tr("Hiba / Error"), f"Language change failed: {e}")
+
     def _build_toolbar(self) -> None:
-        tb = QToolBar("Gyorseszközök")
+        tb = QToolBar(tr("Gyorseszközök"))
         tb.setMovable(False)
         tb.setObjectName("main_toolbar")
         self.addToolBar(tb)
 
-        act_a = QAction("📂  Kép A", self)
-        act_a.setToolTip("Kép A betöltése (Ctrl+1)")
+        act_a = QAction(tr("📂  Kép A"), self)
+        act_a.setToolTip(tr("Kép A betöltése (Ctrl+1)"))
         act_a.triggered.connect(lambda: self.load_image("A"))
 
-        act_b = QAction("📂  Kép B", self)
-        act_b.setToolTip("Kép B betöltése (Ctrl+2)")
+        act_b = QAction(tr("📂  Kép B"), self)
+        act_b.setToolTip(tr("Kép B betöltése (Ctrl+2)"))
         act_b.triggered.connect(lambda: self.load_image("B"))
 
-        act_both = QAction("📂  Mindkét kép…", self)
+        act_both = QAction(tr("📂  Mindkét kép…"), self)
         act_both.setToolTip(
-            "Két képfájl egyszerre kijelölése\n"
-            "Az első lesz Kép A, a második Kép B")
+            tr("Két képfájl egyszerre kijelölése\n"
+            "Az első lesz Kép A, a második Kép B"))
         act_both.triggered.connect(self.load_images_both)
 
         tb.addAction(act_a)
@@ -2289,7 +2370,7 @@ class MainWindow(QMainWindow):
         backend       : illesztési algoritmus neve (felülírja az auto_tab beállítását)
         """
         if self.project.image_a is None or self.project.image_b is None:
-            QMessageBox.warning(self, "Hiányzó kép", "Tölts be mindkét képet!")
+            QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
             return
         if len(img_polygon) < 3:
             return
@@ -2299,9 +2380,9 @@ class MainWindow(QMainWindow):
         params["backend"] = backend
 
         n_verts    = len(img_polygon)
-        shape_name = "téglalap" if n_verts == 4 else f"{n_verts}-szög"
+        shape_name = tr("téglalap") if n_verts == 4 else f"{n_verts}-" + tr("szög")
         self.statusBar().showMessage(
-            f"ROI illesztés  [{backend}]  ({shape_name}, {n_verts} csúcs)…")
+            tr("ROI illesztés  [") + f"{backend}]  ({shape_name}, {n_verts} " + tr("csúcs)…"))
         QApplication.processEvents()
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -2323,6 +2404,7 @@ class MainWindow(QMainWindow):
             if delete_in_roi:
                 pa_list = self.project.anchor_points_a
                 pb_list = self.project.anchor_points_b
+                assert len(pa_list) == len(pb_list), f"Length mismatch: pa_list={len(pa_list)}, pb_list={len(pb_list)}"
                 for i, (pa, pb) in enumerate(zip(pa_list, pb_list)):
                     test_pt = pa if side == "A" else pb
                     if _in_poly(test_pt[0], test_pt[1]):
@@ -2342,7 +2424,7 @@ class MainWindow(QMainWindow):
             pts_a_all, pts_b_all, device = result
 
             if len(pts_a_all) == 0:
-                self.statusBar().showMessage("ROI illesztés: nem talált egyezést.")
+                self.statusBar().showMessage(tr("ROI illesztés: nem talált egyezést."))
                 return
 
             # ── Sokszög-szűrés ────────────────────────────────────────────────
@@ -2356,7 +2438,7 @@ class MainWindow(QMainWindow):
 
             if len(pts_a_roi) == 0:
                 self.statusBar().showMessage(
-                    "ROI illesztés: a területen belül nincs egyezés.")
+                    tr("ROI illesztés: a területen belül nincs egyezés."))
                 return
 
             # ── RANSAC szűrés (ha be van kapcsolva) ──────────────────────────
@@ -2370,6 +2452,7 @@ class MainWindow(QMainWindow):
 
             # ── Meglévő pontpárokhoz hozzáfűzés ─────────────────────────────
             self.editor_tab.point_editor._push_undo()
+            assert len(pts_a_roi) == len(pts_b_roi), f"ROI points length mismatch: {len(pts_a_roi)} vs {len(pts_b_roi)}"
             for pa, pb in zip(pts_a_roi.tolist(), pts_b_roi.tolist()):
                 self.project.anchor_points_a.append(pa)
                 self.project.anchor_points_b.append(pb)
@@ -2377,15 +2460,15 @@ class MainWindow(QMainWindow):
             self.editor_tab.refresh_views()
             n_new = len(pts_a_roi)
             n_all = len(self.project.anchor_points_a)
-            del_info = f"  |  {len(to_del)} pár törölve" if delete_in_roi and to_del else ""
+            del_info = (tr("  |  ") + f"{len(to_del)} " + tr("pár törölve")) if delete_in_roi and to_del else ""
             self.statusBar().showMessage(
-                f"ROI illesztés kész  –  +{n_new} új pár  "
-                f"(összesen: {n_all}){del_info}  |  {device}")
+                tr("ROI illesztés kész  –  +") + f"{n_new} " + tr("új pár  "
+                "(összesen: ") + f"{n_all}){del_info}  |  {device}")
 
         except Exception as exc:
-            QMessageBox.critical(self, "ROI illesztési hiba",
-                                 log_exception_text("Hiba:", exc))
-            self.statusBar().showMessage("ROI illesztés sikertelen.")
+            QMessageBox.critical(self, tr("ROI illesztési hiba"),
+                                 log_exception_text(tr("Hiba:"), exc))
+            self.statusBar().showMessage(tr("ROI illesztés sikertelen."))
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -2408,7 +2491,7 @@ class MainWindow(QMainWindow):
         try:
             img = cv_imread_unicode_safe(Path(path))
         except Exception as exc:
-            QMessageBox.critical(self, "Hiba a kép betöltésekor", str(exc))
+            QMessageBox.critical(self, tr("Hiba a kép betöltésekor"), str(exc))
             return
         if slot == "A":
             self.project.image_a      = img
@@ -2420,14 +2503,14 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.tabs.setCurrentIndex(1)
         self.statusBar().showMessage(
-            f"Kép {slot} betöltve: {Path(path).name}  "
+            tr("Kép ") + f"{slot} " + tr("betöltve: ") + f"{Path(path).name}  "
             f"({img.shape[1]}×{img.shape[0]} px)"
         )
 
     def load_image(self, slot: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, f"Kép {slot} megnyitása", "",
-            "Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)"
+            self, tr("Kép ") + f"{slot} " + tr("megnyitása"), "",
+            tr("Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)")
         )
         if path:
             self._load_image_from_path(path, slot)
@@ -2435,8 +2518,8 @@ class MainWindow(QMainWindow):
     def load_images_both(self) -> None:
         """Két képfájl egyszerre kijelölése – az első lesz A, a második B."""
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Két kép kijelölése (első = A, második = B)", "",
-            "Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)"
+            self, tr("Két kép kijelölése (első = A, második = B)"), "",
+            tr("Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)")
         )
         if not paths:
             return
@@ -2446,19 +2529,19 @@ class MainWindow(QMainWindow):
             self._load_image_from_path(paths[1], "B")
         if len(paths) > 2:
             self.statusBar().showMessage(
-                f"Kép A+B betöltve  –  {len(paths) - 2} fájl figyelmen kívül hagyva."
+                tr("Kép A+B betöltve  –  ") + f"{len(paths) - 2} " + tr("fájl figyelmen kívül hagyva.")
             )
 
     # ── Automatikus illesztés ────────────────────────────────────────────────
 
     def run_auto_match(self) -> None:
         if self.project.image_a is None or self.project.image_b is None:
-            QMessageBox.warning(self, "Hiányzó kép", "Tölts be mindkét képet!")
+            QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
             return
 
         params  = self.auto_tab.get_match_params()
         backend = params["backend"]
-        self.statusBar().showMessage(f"Automatikus illesztés folyamatban  [{backend}]…")
+        self.statusBar().showMessage(tr("Automatikus illesztés folyamatban  [") + f"{backend}]…")
         QApplication.processEvents()
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -2466,11 +2549,11 @@ class MainWindow(QMainWindow):
             result = self._run_backend(
                 self.project.image_a, self.project.image_b, params)
             if result is None:
-                self.statusBar().showMessage("Illesztés megszakítva.")
+                self.statusBar().showMessage(tr("Illesztés megszakítva."))
                 return
             pts_a, pts_b, device = result
             if pts_a is None:
-                self.statusBar().showMessage("Illesztés megszakítva.")
+                self.statusBar().showMessage(tr("Illesztés megszakítva."))
                 return
             self.project.raw_matches_a = pts_a.tolist()
             self.project.raw_matches_b = pts_b.tolist()
@@ -2511,12 +2594,12 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(1)
             n = len(self.project.anchor_points_a)
             self.statusBar().showMessage(
-                f"Illesztés kész  –  {n} pontpár  |  eszköz: {device}")
+                tr("Illesztés kész  –  ") + f"{n} " + tr("pontpár  |  eszköz: ") + f"{device}")
 
         except Exception as exc:
-            QMessageBox.critical(self, "Illesztési hiba",
-                                 log_exception_text("Hiba az illesztés során:", exc))
-            self.statusBar().showMessage("Illesztés sikertelen.")
+            QMessageBox.critical(self, tr("Illesztési hiba"),
+                                 log_exception_text(tr("Hiba az illesztés során:"), exc))
+            self.statusBar().showMessage(tr("Illesztés sikertelen."))
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -2535,7 +2618,7 @@ class MainWindow(QMainWindow):
         visszaoffseteljük az eredeti képkoordináta-rendszerbe.
         """
         if self.project.image_a is None or self.project.image_b is None:
-            QMessageBox.warning(self, "Hiányzó kép", "Tölts be mindkét képet!")
+            QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
             return
 
         img_a = self.project.image_a
@@ -2556,26 +2639,26 @@ class MainWindow(QMainWindow):
             crop_a, off_ax, off_ay = _crop(img_a, roi_a)
             crop_b, off_bx, off_by = _crop(img_b, roi_b)
         except ValueError as exc:
-            QMessageBox.warning(self, "ROI hiba", str(exc))
+            QMessageBox.warning(self, tr("ROI hiba"), str(exc))
             return
 
         params  = self.auto_tab.get_match_params()
         params["backend"] = backend
         self.statusBar().showMessage(
-            f"ROI illesztés folyamatban  [{backend}]  "
+            tr("ROI illesztés folyamatban  [") + f"{backend}]  "
             f"A: {crop_a.shape[1]}×{crop_a.shape[0]}  "
-            f"B: {crop_b.shape[1]}×{crop_b.shape[0]}  px…")
+            f"B: {crop_b.shape[1]}×{crop_b.shape[0]} " + tr("px…"))
         QApplication.processEvents()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
         try:
             result = self._run_backend(crop_a, crop_b, params)
             if result is None:
-                self.statusBar().showMessage("ROI illesztés megszakítva.")
+                self.statusBar().showMessage(tr("ROI illesztés megszakítva."))
                 return
             pts_a_crop, pts_b_crop, device = result
             if pts_a_crop is None or len(pts_a_crop) == 0:
-                self.statusBar().showMessage("ROI illesztés: nem találhatók pontpárok.")
+                self.statusBar().showMessage(tr("ROI illesztés: nem találhatók pontpárok."))
                 return
 
             # RANSAC szűrés a vágott koordinátákon
@@ -2604,6 +2687,8 @@ class MainWindow(QMainWindow):
             # delete_in_roi: meglévő párok törlése mindkét ROI-n belül
             if delete_in_roi:
                 keep = []
+                assert len(self.project.anchor_points_a) == len(self.project.anchor_points_b), \
+                    f"Point list length mismatch: {len(self.project.anchor_points_a)} vs {len(self.project.anchor_points_b)}"
                 for i, (pa, pb) in enumerate(zip(
                         self.project.anchor_points_a,
                         self.project.anchor_points_b)):
@@ -2624,13 +2709,13 @@ class MainWindow(QMainWindow):
             n_new = len(pts_a_full)
             n_tot = len(self.project.anchor_points_a)
             self.statusBar().showMessage(
-                f"ROI illesztés kész  –  +{n_new} új pár  |  összesen: {n_tot}  "
-                f"|  eszköz: {device}")
+                tr("ROI illesztés kész  –  +") + f"{n_new} " + tr("új pár  |  összesen: ") + f"{n_tot}  "
+                f"|  " + tr("eszköz: ") + f"{device}")
 
         except Exception as exc:
-            QMessageBox.critical(self, "ROI illesztési hiba",
-                                 log_exception_text("Hiba:", exc))
-            self.statusBar().showMessage("ROI illesztés sikertelen.")
+            QMessageBox.critical(self, tr("ROI illesztési hiba"),
+                                 log_exception_text(tr("Hiba:"), exc))
+            self.statusBar().showMessage(tr("ROI illesztés sikertelen."))
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -2640,21 +2725,21 @@ class MainWindow(QMainWindow):
         if not (self.project.anchor_points_a or self.project.anchor_points_b):
             return
         reply = QMessageBox.question(
-            self, "Megerősítés",
-            "Biztosan törlöd az összes pontpárt?",
+            self, tr("Megerősítés"),
+            tr("Biztosan törlöd az összes pontpárt?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.project.anchor_points_a.clear()
             self.project.anchor_points_b.clear()
             self.editor_tab.refresh_views()
-            self.statusBar().showMessage("Összes pontpár törölve.")
+            self.statusBar().showMessage(tr("Összes pontpár törölve."))
 
     # ── Projekt mentése / betöltése ──────────────────────────────────────────
 
     def save_project(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Projekt mentése", "", "ArchMorph projekt (*.json)")
+            self, tr("Projekt mentése"), "", tr("ArchMorph projekt (*.json)"))
         if not path:
             return
         data = {
@@ -2675,8 +2760,17 @@ class MainWindow(QMainWindow):
         """Belső segédmetódus: projektfájl betöltése a megadott elérési útról."""
         try:
             data = load_json_utf8(Path(path))
-            self.project.anchor_points_a   = data.get("points_a", [])
-            self.project.anchor_points_b   = data.get("points_b", [])
+            pts_a = data.get("points_a", [])
+            pts_b = data.get("points_b", [])
+            
+            # Validate anchor points before assigning
+            try:
+                clean_a, clean_b = _validate_anchor_points(pts_a, pts_b)
+                self.project.anchor_points_a = list(clean_a)
+                self.project.anchor_points_b = list(clean_b)
+            except ValueError as ve:
+                raise ValueError(f"Invalid point data in project: {ve}")
+            
             self.project.homography_matrix = data.get("homography")
 
             for slot, key in [("A", "image_a"), ("B", "image_b")]:
@@ -2695,14 +2789,14 @@ class MainWindow(QMainWindow):
             self._update_title()
             self.tabs.setCurrentIndex(1)
             self.statusBar().showMessage(
-                f"Projekt betöltve: {Path(path).name}  "
-                f"({len(self.project.anchor_points_a)} pontpár)")
+                tr("Projekt betöltve: ") + f"{Path(path).name}  "
+                f"({len(self.project.anchor_points_a)} " + tr("pontpár)"))
         except Exception as exc:
-            QMessageBox.critical(self, "Betöltési hiba", str(exc))
+            QMessageBox.critical(self, tr("Betöltési hiba"), str(exc))
 
     def load_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Projekt megnyitása", "", "ArchMorph projekt (*.json)")
+            self, tr("Projekt megnyitása"), "", tr("ArchMorph projekt (*.json)"))
         if path:
             self._load_project_from_path(path)
 

@@ -46,6 +46,11 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
+try:
+    from TRANSLATIONS import tr
+except ImportError:
+    def tr(text: str) -> str: return text
+
 # ── Konfiguráció betöltése ────────────────────────────────────────────────────
 # Az archmorph_config.toml fájlból olvassa az értékeket (ha létezik).
 # Ha nem létezik, vagy hibás, az alábbi alapértelmezett értékek maradnak.
@@ -828,16 +833,16 @@ class PointEditorCanvas(QWidget):
             "QMenu::item:selected{background:#3a3f4a;}"
             "QMenu::separator{background:#444;height:1px;margin:3px 6px;}"
         )
-        header = QAction(f"  Pont  #{index + 1}", self)
+        header = QAction(tr(f"  Pont  #{index + 1}"), self)
         header.setEnabled(False)
         menu.addAction(header)
         menu.addSeparator()
 
-        act_sel = QAction("Kiválasztás", self)
+        act_sel = QAction(tr("Kiválasztás"), self)
         act_sel.triggered.connect(lambda: self.point_selected.emit(index))
         menu.addAction(act_sel)
 
-        act_del = QAction("Törlés  (párjával együtt)", self)
+        act_del = QAction(tr("Törlés  (párjával együtt)"), self)
         act_del.triggered.connect(lambda: self.point_deleted.emit(index))
         menu.addAction(act_del)
 
@@ -1097,7 +1102,7 @@ class PointEditorWidget(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
-        self.btn_del = QPushButton("✕  Kiválasztott pár(ok) törlése")
+        self.btn_del = QPushButton(tr("✕  Kiválasztott pár(ok) törlése"))
         self.btn_del.setEnabled(False)
         self.btn_del.setFixedHeight(28)
         self.btn_del.setStyleSheet(
@@ -1108,12 +1113,12 @@ class PointEditorWidget(QWidget):
         )
         self.btn_del.clicked.connect(self._delete_selection)
 
-        self.btn_roi_search = QPushButton("🔍  ROI keresés")
+        self.btn_roi_search = QPushButton(tr("🔍  ROI keresés"))
         self.btn_roi_search.setEnabled(False)
         self.btn_roi_search.setFixedHeight(28)
         self.btn_roi_search.setToolTip(
-            "Pontkeresés és párosítás csak a megjelölt ROI területeken belül\n"
-            "(mindkét képen kell aktív ROI)")
+            tr("Pontkeresés és párosítás csak a megjelölt ROI területeken belül\n"
+            "(mindkét képen kell aktív ROI)"))
         self.btn_roi_search.setStyleSheet(
             "QPushButton{background:#1a4a2e;color:#eee;padding:0 10px;"
             "border-radius:4px;font-size:12px;}"
@@ -1122,10 +1127,10 @@ class PointEditorWidget(QWidget):
         )
         self.btn_roi_search.clicked.connect(self._on_dual_roi_search)
 
-        self.btn_roi_clear = QPushButton("⬜  ROI törlése")
+        self.btn_roi_clear = QPushButton(tr("⬜  ROI törlése"))
         self.btn_roi_clear.setEnabled(False)
         self.btn_roi_clear.setFixedHeight(28)
-        self.btn_roi_clear.setToolTip("Mindkét canvas ROI-jának törlése")
+        self.btn_roi_clear.setToolTip(tr("Mindkét canvas ROI-jának törlése"))
         self.btn_roi_clear.setStyleSheet(
             "QPushButton{background:#2e2e2e;color:#aaa;padding:0 10px;"
             "border-radius:4px;font-size:12px;}"
@@ -1141,7 +1146,7 @@ class PointEditorWidget(QWidget):
         )
         self.lbl_hint.setStyleSheet("color:#666;font-size:11px;")
 
-        self.lbl_count = QLabel("Pontpárok: 0")
+        self.lbl_count = QLabel(tr("Pontpárok: 0"))
         self.lbl_count.setStyleSheet("color:#aaa;font-size:12px;")
 
         bar.addWidget(self.btn_del)
@@ -1229,7 +1234,7 @@ class PointEditorWidget(QWidget):
         self._selected_set = {i for i in self._selected_set if i < n}
         self.canvas_a.set_selected_set(list(self._selected_set))
         self.canvas_b.set_selected_set(list(self._selected_set))
-        self.lbl_count.setText(f"Pontpárok: {n}")
+        self.lbl_count.setText(tr(f"Pontpárok: {n}"))
 
     def _select(self, index: int) -> None:
         self._selected = index
@@ -1333,12 +1338,12 @@ class PointEditorWidget(QWidget):
             ag.addAction(act)
             sub.addAction(act)
 
-        act_del = QAction("ROI-n belüli meglévő párokat törölje előbb", menu,
+        act_del = QAction(tr("ROI-n belüli meglévő párokat törölje előbb"), menu,
                           checkable=True)
         act_del.setChecked(self._roi_delete_in_roi)
         menu.addAction(act_del)
         menu.addSeparator()
-        act_go  = QAction("🔍  Keresés indítása", menu)
+        act_go  = QAction(tr("🔍  Keresés indítása"), menu)
         menu.addAction(act_go)
 
         chosen = menu.exec(self.btn_roi_search.mapToGlobal(
@@ -1403,7 +1408,7 @@ class PointEditorWidget(QWidget):
         # Cím (nem kattintható)
         n_verts    = len(img_poly)
         shape_name = "téglalap-ROI" if n_verts == 4 else f"{n_verts}-szög ROI"
-        title_act  = QAction(f"  {shape_name}  –  keresési beállítások", menu)
+        title_act  = QAction(tr(f"  {shape_name}  –  keresési beállítások"), menu)
         title_act.setEnabled(False)
         menu.addAction(title_act)
         menu.addSeparator()
@@ -1425,20 +1430,20 @@ class PointEditorWidget(QWidget):
         menu.addSeparator()
 
         # Meglévő pontok törlése ROI-ban (be/ki kapcsolható)
-        del_act = QAction("Meglévő pontok törlése a területen belül", menu)
+        del_act = QAction(tr("Meglévő pontok törlése a területen belül"), menu)
         del_act.setCheckable(True)
         del_act.setChecked(self._roi_delete_in_roi)
         del_act.setToolTip(
-            "Ha be van jelölve, keresés előtt törli az összes meglévő\n"
-            "pontpárt amelyek bármelyik tagja a berajzolt területen belül esik.")
+            tr("Ha be van jelölve, keresés előtt törli az összes meglévő\n"
+            "pontpárt amelyek bármelyik tagja a berajzolt területen belül esik."))
         menu.addAction(del_act)
         menu.addSeparator()
 
         # Keresés gomb
-        search_act = QAction(f"▶  ROI keresés indítása", menu)
+        search_act = QAction(tr(f"▶  ROI keresés indítása"), menu)
         menu.addAction(search_act)
 
-        cancel_act = QAction("✕  Mégse", menu)
+        cancel_act = QAction(tr("✕  Mégse"), menu)
         menu.addAction(cancel_act)
 
         # ── Menü megjelenítése ────────────────────────────────────────────────

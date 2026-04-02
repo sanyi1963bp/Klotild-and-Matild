@@ -45,6 +45,12 @@ except ImportError:
     def cfg_reload(): pass                           # type: ignore[misc]
     _CONFIG_FILE = pathlib.Path(__file__).parent / "archmorph_config.toml"
 
+
+try:
+    from TRANSLATIONS import tr
+except ImportError:
+    def tr(text: str) -> str: return text
+
 _PROFILES_DIR: pathlib.Path = _CONFIG_FILE.parent / "profiles"
 
 
@@ -63,364 +69,373 @@ _PROFILES_DIR: pathlib.Path = _CONFIG_FILE.parent / "profiles"
 #   choices  – choice típusnál a lehetséges értékek listája
 
 _SCHEMA: List[Dict] = [
+    {
+        "section": tr("🌐  Nyelv / Language"),
+        "prefix": "ui",
+        "keys": [
+            {"key": "language", "label": tr("Felület nyelve"), "type": "choice",
+             "default": "hu", "choices": ["hu", "en"],
+             "desc": tr("A program felhasználói felületének nyelve. Újraindítás szükséges.")},
+        ],
+    },
     # ── Pontok – körvonal ─────────────────────────────────────────────────────
     {
-        "section": "🎨  Pontok – Körvonal",
+        "section": tr("🎨  Pontok – Körvonal"),
         "prefix": "ui.colors.points",
         "keys": [
-            {"key": "normal",      "label": "Normál",          "type": "color",
+            {"key": "normal",      "label": tr("Normál"),          "type": "color",
              "default": "#ff8a3d",
-             "desc": "Nem kijelölt pont körének vonalszíne."},
-            {"key": "active",      "label": "Aktív",           "type": "color",
+             "desc": tr("Nem kijelölt pont körének vonalszíne.")},
+            {"key": "active",      "label": tr("Aktív"),           "type": "color",
              "default": "#ff3333",
-             "desc": "Éppen kiválasztott pont (kereszthajszal jelenik meg)."},
-            {"key": "multi",       "label": "Multi-kijelölt",  "type": "color",
+             "desc": tr("Éppen kiválasztott pont (kereszthajszal jelenik meg).")},
+            {"key": "multi",       "label": tr("Multi-kijelölt"),  "type": "color",
              "default": "#44aaff",
-             "desc": "Gumiszalag-kerettel egyszerre kijelölt pontok."},
-            {"key": "text",        "label": "Sorszám szín",    "type": "color",
+             "desc": tr("Gumiszalag-kerettel egyszerre kijelölt pontok.")},
+            {"key": "text",        "label": tr("Sorszám szín"),    "type": "color",
              "default": "#ffffff",
-             "desc": "Pontok mellé rajzolt sorszám felirat normál állapotban."},
-            {"key": "text_active", "label": "Sorszám (aktív)", "type": "color",
+             "desc": tr("Pontok mellé rajzolt sorszám felirat normál állapotban.")},
+            {"key": "text_active", "label": tr("Sorszám (aktív)"), "type": "color",
              "default": "#ffcccc",
-             "desc": "Sorszám felirat az aktív pont mellett."},
+             "desc": tr("Sorszám felirat az aktív pont mellett.")},
         ],
     },
     # ── Pontok – kitöltés ─────────────────────────────────────────────────────
     {
-        "section": "🎨  Pontok – Belső kitöltés (RGBA)",
+        "section": tr("🎨  Pontok – Belső kitöltés (RGBA)"),
         "prefix": "ui.colors.points.fill",
         "keys": [
-            {"key": "normal_rgba", "label": "Normál fill",     "type": "rgba",
+            {"key": "normal_rgba", "label": tr("Normál fill"),     "type": "rgba",
              "default": (255, 138,  61,  70),
-             "desc": "Nem kijelölt pont belső kitöltése. A = átlátszatlanság (0–255)."},
-            {"key": "active_rgba", "label": "Aktív fill",      "type": "rgba",
+             "desc": tr("Nem kijelölt pont belső kitöltése. A = átlátszatlanság (0–255).")},
+            {"key": "active_rgba", "label": tr("Aktív fill"),      "type": "rgba",
              "default": (255,  51,  51, 150),
-             "desc": "Aktív pont belső kitöltése."},
-            {"key": "multi_rgba",  "label": "Multi fill",      "type": "rgba",
+             "desc": tr("Aktív pont belső kitöltése.")},
+            {"key": "multi_rgba",  "label": tr("Multi fill"),      "type": "rgba",
              "default": ( 68, 170, 255,  90),
-             "desc": "Multi-kijelölt pont belső kitöltése."},
+             "desc": tr("Multi-kijelölt pont belső kitöltése.")},
         ],
     },
     # ── ROI ───────────────────────────────────────────────────────────────────
     {
-        "section": "🟠  ROI – Keresési ablak",
+        "section": tr("🟠  ROI – Keresési ablak"),
         "prefix": "ui.colors.roi",
         "keys": [
-            {"key": "border",       "label": "Keret szín",   "type": "color",
+            {"key": "border",       "label": tr("Keret szín"),   "type": "color",
              "default": "#ff9900",
-             "desc": "ROI téglalap keretének vonalszíne. Ctrl+húzással rajzolható."},
-            {"key": "handle",       "label": "Fogópont",     "type": "color",
+             "desc": tr("ROI téglalap keretének vonalszíne. Ctrl+húzással rajzolható.")},
+            {"key": "handle",       "label": tr("Fogópont"),     "type": "color",
              "default": "#ffffff",
-             "desc": "A 8 átméretező fogópont kitöltési színe."},
-            {"key": "fill_rgba",    "label": "Belső fill",   "type": "rgba",
+             "desc": tr("A 8 átméretező fogópont kitöltési színe.")},
+            {"key": "fill_rgba",    "label": tr("Belső fill"),   "type": "rgba",
              "default": (255, 153, 0, 22),
-             "desc": "ROI belső áttetsző kitöltése."},
-            {"key": "outside_rgba", "label": "Külső árnyék", "type": "rgba",
+             "desc": tr("ROI belső áttetsző kitöltése.")},
+            {"key": "outside_rgba", "label": tr("Külső árnyék"), "type": "rgba",
              "default": (0, 0, 0, 90),
-             "desc": "ROI-n kívüli terület elsötétítő réteg."},
+             "desc": tr("ROI-n kívüli terület elsötétítő réteg.")},
         ],
     },
     # ── Vászon ────────────────────────────────────────────────────────────────
     {
-        "section": "🖼  Vászon háttér",
+        "section": tr("🖼  Vászon háttér"),
         "prefix": "ui.colors.canvas",
         "keys": [
-            {"key": "background",  "label": "Háttér",        "type": "color",
+            {"key": "background",  "label": tr("Háttér"),        "type": "color",
              "default": "#1a1f24",
-             "desc": "Vászon háttérszíne (kép mögötti terület)."},
-            {"key": "border",      "label": "Keret",         "type": "color",
+             "desc": tr("Vászon háttérszíne (kép mögötti terület).")},
+            {"key": "border",      "label": tr("Keret"),         "type": "color",
              "default": "#343b45",
-             "desc": "Vászon keretes kerete."},
-            {"key": "placeholder", "label": "Helytartó",     "type": "color",
+             "desc": tr("Vászon keretes kerete.")},
+            {"key": "placeholder", "label": tr("Helytartó"),     "type": "color",
              "default": "#4a5260",
-             "desc": "'Nincs kép betöltve' szöveg és vázlat szín."},
+             "desc": tr("'Nincs kép betöltve' szöveg és vázlat szín.")},
         ],
     },
     # ── Gumiszalag ────────────────────────────────────────────────────────────
     {
-        "section": "⬜  Gumiszalag-keret (húzásos kijelölés)",
+        "section": tr("⬜  Gumiszalag-keret (húzásos kijelölés)"),
         "prefix": "ui.colors.rband",
         "keys": [
-            {"key": "selection", "label": "Kijelölés keret", "type": "color",
+            {"key": "selection", "label": tr("Kijelölés keret"), "type": "color",
              "default": "#88bbff",
-             "desc": "Bal gomb + húzás: pontokat kijelölő szaggatott keret."},
-            {"key": "roi",       "label": "ROI keret",       "type": "color",
+             "desc": tr("Bal gomb + húzás: pontokat kijelölő szaggatott keret.")},
+            {"key": "roi",       "label": tr("ROI keret"),       "type": "color",
              "default": "#ffcc44",
-             "desc": "Ctrl + húzás: ROI-t rajzoló szaggatott keret."},
+             "desc": tr("Ctrl + húzás: ROI-t rajzoló szaggatott keret.")},
         ],
     },
     # ── Sokszög-ROI ───────────────────────────────────────────────────────────
     {
-        "section": "🔷  Sokszög-ROI",
+        "section": tr("🔷  Sokszög-ROI"),
         "prefix": "ui.colors.polygon",
         "keys": [
-            {"key": "draw",      "label": "Rajzolás",        "type": "color",
+            {"key": "draw",      "label": tr("Rajzolás"),        "type": "color",
              "default": "#FFB300",
-             "desc": "Sokszög rajzolás közben (még nem lezárt)."},
-            {"key": "done",      "label": "Lezárt",          "type": "color",
+             "desc": tr("Sokszög rajzolás közben (még nem lezárt).")},
+            {"key": "done",      "label": tr("Lezárt"),          "type": "color",
              "default": "#FF6F00",
-             "desc": "Lezárt sokszög (helyi menü aktív állapot)."},
-            {"key": "fill_rgba", "label": "Kitöltés",        "type": "rgba",
+             "desc": tr("Lezárt sokszög (helyi menü aktív állapot).")},
+            {"key": "fill_rgba", "label": tr("Kitöltés"),        "type": "rgba",
              "default": (255, 179, 0, 35),
-             "desc": "Sokszög belsejének áttetsző kitöltése."},
+             "desc": tr("Sokszög belsejének áttetsző kitöltése.")},
         ],
     },
     # ── Export előnézet ───────────────────────────────────────────────────────
     {
-        "section": "🎬  Export előnézet",
+        "section": tr("🎬  Export előnézet"),
         "prefix": "ui.colors.preview",
         "keys": [
-            {"key": "background", "label": "Háttér",         "type": "color",
+            {"key": "background", "label": tr("Háttér"),         "type": "color",
              "default": "#0d1117",
-             "desc": "Az export előnézet vászon háttérszíne."},
+             "desc": tr("Az export előnézet vászon háttérszíne.")},
         ],
     },
     # ── Téma ──────────────────────────────────────────────────────────────────
     {
-        "section": "🎨  UI Téma – Globális sötét téma",
+        "section": tr("🎨  UI Téma – Globális sötét téma"),
         "prefix": "ui.colors.theme",
         "keys": [
-            {"key": "window_bg",    "label": "Ablak háttér",      "type": "color",
-             "default": "#1a1f24",  "desc": "Főablak háttérszíne."},
-            {"key": "panel_bg",     "label": "Panel háttér",      "type": "color",
-             "default": "#252a33",  "desc": "Panelek, fülek, beviteli mezők háttere."},
-            {"key": "statusbar_bg", "label": "Állapotsor",        "type": "color",
-             "default": "#111418",  "desc": "Állapotsor + eszköztár háttere."},
-            {"key": "button_bg",    "label": "Gomb",              "type": "color",
-             "default": "#2c3340",  "desc": "Gombok alap háttere."},
-            {"key": "button_hover", "label": "Gomb (hover)",      "type": "color",
-             "default": "#3a4252",  "desc": "Gombok hover állapota."},
-            {"key": "input_bg",     "label": "Beviteli mező",     "type": "color",
-             "default": "#252a33",  "desc": "QSpinBox, QComboBox, QLineEdit háttere."},
-            {"key": "separator",    "label": "Elválasztó",        "type": "color",
-             "default": "#343b45",  "desc": "Elválasztó vonalak, csoportdoboz-keretek."},
-            {"key": "text_main",    "label": "Fő szöveg",         "type": "color",
-             "default": "#d7dde5",  "desc": "Elsődleges szövegszín."},
-            {"key": "text_dim",     "label": "Halvány szöveg",    "type": "color",
-             "default": "#888888",  "desc": "Halkított szöveg (állapotsor, kis feliratok)."},
-            {"key": "text_label",   "label": "Felirat",           "type": "color",
-             "default": "#aaaaaa",  "desc": "QLabel feliratok."},
-            {"key": "group_title",  "label": "Csoport fejléc",    "type": "color",
-             "default": "#99aaaa",  "desc": "QGroupBox fejléc szöveg."},
-            {"key": "stale_bg",     "label": "Elavult gomb h.",   "type": "color",
-             "default": "#5a3800",  "desc": "'Újragenerálás szükséges' gomb háttere."},
-            {"key": "stale_border", "label": "Elavult gomb k.",   "type": "color",
-             "default": "#e8a020",  "desc": "'Újragenerálás szükséges' gomb kerete."},
-            {"key": "stale_text",   "label": "Elavult gomb sz.",  "type": "color",
-             "default": "#ffcc66",  "desc": "'Újragenerálás szükséges' gomb szövege."},
+            {"key": "window_bg",    "label": tr("Ablak háttér"),      "type": "color",
+             "default": "#1a1f24",  "desc": tr("Főablak háttérszíne.")},
+            {"key": "panel_bg",     "label": tr("Panel háttér"),      "type": "color",
+             "default": "#252a33",  "desc": tr("Panelek, fülek, beviteli mezők háttere.")},
+            {"key": "statusbar_bg", "label": tr("Állapotsor"),        "type": "color",
+             "default": "#111418",  "desc": tr("Állapotsor + eszköztár háttere.")},
+            {"key": "button_bg",    "label": tr("Gomb"),              "type": "color",
+             "default": "#2c3340",  "desc": tr("Gombok alap háttere.")},
+            {"key": "button_hover", "label": tr("Gomb (hover)"),      "type": "color",
+             "default": "#3a4252",  "desc": tr("Gombok hover állapota.")},
+            {"key": "input_bg",     "label": tr("Beviteli mező"),     "type": "color",
+             "default": "#252a33",  "desc": tr("QSpinBox, QComboBox, QLineEdit háttere.")},
+            {"key": "separator",    "label": tr("Elválasztó"),        "type": "color",
+             "default": "#343b45",  "desc": tr("Elválasztó vonalak, csoportdoboz-keretek.")},
+            {"key": "text_main",    "label": tr("Fő szöveg"),         "type": "color",
+             "default": "#d7dde5",  "desc": tr("Elsődleges szövegszín.")},
+            {"key": "text_dim",     "label": tr("Halvány szöveg"),    "type": "color",
+             "default": "#888888",  "desc": tr("Halkított szöveg (állapotsor, kis feliratok).")},
+            {"key": "text_label",   "label": tr("Felirat"),           "type": "color",
+             "default": "#aaaaaa",  "desc": tr("QLabel feliratok.")},
+            {"key": "group_title",  "label": tr("Csoport fejléc"),    "type": "color",
+             "default": "#99aaaa",  "desc": tr("QGroupBox fejléc szöveg.")},
+            {"key": "stale_bg",     "label": tr("Elavult gomb h."),   "type": "color",
+             "default": "#5a3800",  "desc": tr("'Újragenerálás szükséges' gomb háttere.")},
+            {"key": "stale_border", "label": tr("Elavult gomb k."),   "type": "color",
+             "default": "#e8a020",  "desc": tr("'Újragenerálás szükséges' gomb kerete.")},
+            {"key": "stale_text",   "label": tr("Elavult gomb sz."),  "type": "color",
+             "default": "#ffcc66",  "desc": tr("'Újragenerálás szükséges' gomb szövege.")},
         ],
     },
     # ── Méretek ───────────────────────────────────────────────────────────────
     {
-        "section": "📐  Méretek (pixel)",
+        "section": tr("📐  Méretek (pixel)"),
         "prefix": "ui.sizes",
         "keys": [
-            {"key": "point_radius_normal", "label": "Pont sugár – normál",     "type": "int",
+            {"key": "point_radius_normal", "label": tr("Pont sugár – normál"),     "type": "int",
              "default": 6,  "range": (1, 30),
-             "desc": "Nem kijelölt pont körének sugara px-ben."},
-            {"key": "point_radius_active", "label": "Pont sugár – aktív",      "type": "int",
+             "desc": tr("Nem kijelölt pont körének sugara px-ben.")},
+            {"key": "point_radius_active", "label": tr("Pont sugár – aktív"),      "type": "int",
              "default": 10, "range": (1, 30),
-             "desc": "Aktív (kijelölt) pont körének sugara px-ben."},
-            {"key": "point_radius_multi",  "label": "Pont sugár – multi",      "type": "int",
+             "desc": tr("Aktív (kijelölt) pont körének sugara px-ben.")},
+            {"key": "point_radius_multi",  "label": tr("Pont sugár – multi"),      "type": "int",
              "default": 8,  "range": (1, 30),
-             "desc": "Multi-kijelölt pont körének sugara px-ben."},
-            {"key": "point_hit_radius",    "label": "Kattintási érzékenység",  "type": "int",
+             "desc": tr("Multi-kijelölt pont körének sugara px-ben.")},
+            {"key": "point_hit_radius",    "label": tr("Kattintási érzékenység"),  "type": "int",
              "default": 14, "range": (5, 50),
-             "desc": "Ennél közelebb kattintva a pont kijelölődik. Nagyobb = könnyebb kattintani."},
-            {"key": "roi_handle_radius",   "label": "ROI fogópont sugara",     "type": "int",
+             "desc": tr("Ennél közelebb kattintva a pont kijelölődik. Nagyobb = könnyebb kattintani.")},
+            {"key": "roi_handle_radius",   "label": tr("ROI fogópont sugara"),     "type": "int",
              "default": 6,  "range": (2, 20),
-             "desc": "ROI átméretező fogópontok körének sugara px-ben."},
-            {"key": "roi_min_size",        "label": "Minimum ROI méret",       "type": "int",
+             "desc": tr("ROI átméretező fogópontok körének sugara px-ben.")},
+            {"key": "roi_min_size",        "label": tr("Minimum ROI méret"),       "type": "int",
              "default": 10, "range": (5, 100),
-             "desc": "Ennél kisebb Ctrl+húzás figyelmen kívül marad."},
+             "desc": tr("Ennél kisebb Ctrl+húzás figyelmen kívül marad.")},
         ],
     },
     # ── SuperPoint ────────────────────────────────────────────────────────────
     {
-        "section": "🔬  SuperPoint + LightGlue",
+        "section": tr("🔬  SuperPoint + LightGlue"),
         "prefix": "match.superpoint",
         "keys": [
-            {"key": "max_keypoints",       "label": "Max. kulcspontok",      "type": "int",
+            {"key": "max_keypoints",       "label": tr("Max. kulcspontok"),      "type": "int",
              "default": 4096, "range": (128, 8192),
-             "desc": "Több → pontosabb, de lassabb és több GPU-memória. (cvg/LightGlue alapértelmezett: 4096)"},
-            {"key": "detection_threshold", "label": "Detekciós küszöb",      "type": "float",
+             "desc": tr("Több → pontosabb, de lassabb és több GPU-memória. (cvg/LightGlue alapértelmezett: 4096)")},
+            {"key": "detection_threshold", "label": tr("Detekciós küszöb"),      "type": "float",
              "default": 0.005, "range": (0.0001, 0.99), "decimals": 4, "step": 0.001,
-             "desc": "Kisebb → több gyengébb pont; nagyobb → kevesebb, erősebb. (SuperPoint official: 0.005)"},
-            {"key": "nms_radius",          "label": "NMS sugár (px)",         "type": "int",
+             "desc": tr("Kisebb → több gyengébb pont; nagyobb → kevesebb, erősebb. (SuperPoint official: 0.005)")},
+            {"key": "nms_radius",          "label": tr("NMS sugár (px)"),         "type": "int",
              "default": 4, "range": (1, 20),
-             "desc": "Non-Maximum Suppression: pontok legalább ennyi px-re legyenek egymástól. (DeTone 2018: 4)"},
-            {"key": "match_threshold",     "label": "Match küszöb (LG)",      "type": "float",
+             "desc": tr("Non-Maximum Suppression: pontok legalább ennyi px-re legyenek egymástól. (DeTone 2018: 4)")},
+            {"key": "match_threshold",     "label": tr("Match küszöb (LG)"),      "type": "float",
              "default": 0.10, "range": (0.01, 1.0), "decimals": 3, "step": 0.01,
-             "desc": "LightGlue szűrési küszöb – kisebb → szigorúbb. (LightGlue alapértelmezett: 0.1)"},
-            {"key": "depth_confidence",    "label": "Mélység konfidencia",    "type": "float",
+             "desc": tr("LightGlue szűrési küszöb – kisebb → szigorúbb. (LightGlue alapértelmezett: 0.1)")},
+            {"key": "depth_confidence",    "label": tr("Mélység konfidencia"),    "type": "float",
              "default": 0.95, "range": (0.5, 1.0), "decimals": 2, "step": 0.01,
-             "desc": "Korai leállás küszöb – ha megbízható → gyorsabb futás. (ICCV 2023: 0.95)"},
-            {"key": "width_confidence",    "label": "Szélesség konfidencia",  "type": "float",
+             "desc": tr("Korai leállás küszöb – ha megbízható → gyorsabb futás. (ICCV 2023: 0.95)")},
+            {"key": "width_confidence",    "label": tr("Szélesség konfidencia"),  "type": "float",
              "default": 0.99, "range": (0.5, 1.0), "decimals": 2, "step": 0.01,
-             "desc": "Korai leállás küszöb szélesség irányban. (ICCV 2023: 0.99)"},
+             "desc": tr("Korai leállás küszöb szélesség irányban. (ICCV 2023: 0.99)")},
         ],
     },
     # ── DISK ──────────────────────────────────────────────────────────────────
     {
-        "section": "💿  DISK + LightGlue",
+        "section": tr("💿  DISK + LightGlue"),
         "prefix": "match.disk",
         "keys": [
-            {"key": "max_keypoints",   "label": "Max. kulcspontok",     "type": "int",
+            {"key": "max_keypoints",   "label": tr("Max. kulcspontok"),     "type": "int",
              "default": 5000, "range": (128, 8192),
-             "desc": "DISK sűrűbben mintavételez – magasabb érték ajánlott. (DeDoDe/kornia: ~5000–10000)"},
-            {"key": "match_threshold", "label": "Match küszöb (LG)",    "type": "float",
+             "desc": tr("DISK sűrűbben mintavételez – magasabb érték ajánlott. (DeDoDe/kornia: ~5000–10000)")},
+            {"key": "match_threshold", "label": tr("Match küszöb (LG)"),    "type": "float",
              "default": 0.10, "range": (0.01, 1.0), "decimals": 3, "step": 0.01,
-             "desc": "LightGlue szűrési küszöb. (LightGlue alapértelmezett: 0.1)"},
+             "desc": tr("LightGlue szűrési küszöb. (LightGlue alapértelmezett: 0.1)")},
         ],
     },
     # ── LoFTR ─────────────────────────────────────────────────────────────────
     {
-        "section": "🔭  LoFTR",
+        "section": tr("🔭  LoFTR"),
         "prefix": "match.loftr",
         "keys": [
-            {"key": "pretrained",     "label": "Modell típus",          "type": "choice",
+            {"key": "pretrained",     "label": tr("Modell típus"),          "type": "choice",
              "default": "outdoor", "choices": ["outdoor", "indoor"],
-             "desc": "outdoor: épületek, terek, tájak  |  indoor: szobák, belső terek."},
-            {"key": "conf_threshold", "label": "Konfidencia küszöb",    "type": "float",
+             "desc": tr("outdoor: épületek, terek, tájak  |  indoor: szobák, belső terek.")},
+            {"key": "conf_threshold", "label": tr("Konfidencia küszöb"),    "type": "float",
              "default": 0.50, "range": (0.0, 1.0), "decimals": 2, "step": 0.05,
-             "desc": "Csak ennél megbízhatóbb egyezések maradnak. (paper: 0.2; morfinghoz: 0.5)"},
+             "desc": tr("Csak ennél megbízhatóbb egyezések maradnak. (paper: 0.2; morfinghoz: 0.5)")},
         ],
     },
     # ── SIFT ──────────────────────────────────────────────────────────────────
     {
-        "section": "🔍  SIFT",
+        "section": tr("🔍  SIFT"),
         "prefix": "match.sift",
         "keys": [
-            {"key": "max_keypoints",      "label": "Max. kulcspontok",   "type": "int",
+            {"key": "max_keypoints",      "label": tr("Max. kulcspontok"),   "type": "int",
              "default": 0, "range": (0, 8192),
-             "desc": "0 = korlátlan (Lowe 2004 + OpenCV alapértelmezettje). Nagy képnél: 2000–5000."},
-            {"key": "octave_layers",      "label": "Oktáv-rétegek",      "type": "int",
+             "desc": tr("0 = korlátlan (Lowe 2004 + OpenCV alapértelmezettje). Nagy képnél: 2000–5000.")},
+            {"key": "octave_layers",      "label": tr("Oktáv-rétegek"),      "type": "int",
              "default": 3, "range": (1, 10),
-             "desc": "Gauss-skálatér oktávonkénti rétegei. (Lowe 2004: s=3) – általában ne változtasd."},
-            {"key": "contrast_threshold", "label": "Kontraszt küszöb",   "type": "float",
+             "desc": tr("Gauss-skálatér oktávonkénti rétegei. (Lowe 2004: s=3) – általában ne változtasd.")},
+            {"key": "contrast_threshold", "label": tr("Kontraszt küszöb"),   "type": "float",
              "default": 0.04, "range": (0.001, 0.5), "decimals": 3, "step": 0.005,
-             "desc": "Kisebb → több gyenge pont; nagyobb → csak erős. (Lowe 2004: 0.04)"},
-            {"key": "edge_threshold",     "label": "Él küszöb",          "type": "float",
+             "desc": tr("Kisebb → több gyenge pont; nagyobb → csak erős. (Lowe 2004: 0.04)")},
+            {"key": "edge_threshold",     "label": tr("Él küszöb"),          "type": "float",
              "default": 10.0, "range": (1.0, 50.0), "decimals": 1, "step": 1.0,
-             "desc": "Él-jellegű instabil pontok szűrése. (Lowe 2004: r=10)"},
-            {"key": "sigma",              "label": "Gauss sigma",         "type": "float",
+             "desc": tr("Él-jellegű instabil pontok szűrése. (Lowe 2004: r=10)")},
+            {"key": "sigma",              "label": tr("Gauss sigma"),         "type": "float",
              "default": 1.6, "range": (0.5, 5.0), "decimals": 1, "step": 0.1,
-             "desc": "Gauss-simítás sigma értéke. (Lowe 2004: σ=1.6) – általában ne változtasd."},
-            {"key": "ratio_threshold",    "label": "Lowe arány küszöb",  "type": "float",
+             "desc": tr("Gauss-simítás sigma értéke. (Lowe 2004: σ=1.6) – általában ne változtasd.")},
+            {"key": "ratio_threshold",    "label": tr("Lowe arány küszöb"),  "type": "float",
              "default": 0.80, "range": (0.5, 0.99), "decimals": 2, "step": 0.01,
-             "desc": "Kisebb → szigorúbb; 0.80 = Lowe 2004 optimuma ('90% hamis egyezés kiszűrve')."},
+             "desc": tr("Kisebb → szigorúbb; 0.80 = Lowe 2004 optimuma ('90% hamis egyezés kiszűrve').")},
         ],
     },
     # ── RANSAC ────────────────────────────────────────────────────────────────
     {
-        "section": "🎯  RANSAC – Geometriai szűrő",
+        "section": tr("🎯  RANSAC – Geometriai szűrő"),
         "prefix": "match.ransac",
         "keys": [
-            {"key": "enabled",          "label": "Bekapcsolva",       "type": "bool",
+            {"key": "enabled",          "label": tr("Bekapcsolva"),       "type": "bool",
              "default": True,
-             "desc": "Geometriai outlier-szűrő. Erősen ajánlott bekapcsolva hagyni."},
-            {"key": "reproj_threshold", "label": "Reproj. küszöb",    "type": "float",
+             "desc": tr("Geometriai outlier-szűrő. Erősen ajánlott bekapcsolva hagyni.")},
+            {"key": "reproj_threshold", "label": tr("Reproj. küszöb"),    "type": "float",
              "default": 3.0, "range": (0.5, 20.0), "decimals": 1, "step": 0.5,
-             "desc": "Visszavetítési küszöb px-ben. Kisebb → szigorúbb. (OpenCV alapértelmezett: 3.0 px)"},
+             "desc": tr("Visszavetítési küszöb px-ben. Kisebb → szigorúbb. (OpenCV alapértelmezett: 3.0 px)")},
         ],
     },
     # ── Export ────────────────────────────────────────────────────────────────
     {
-        "section": "📤  Export alapértelmezések",
+        "section": tr("📤  Export alapértelmezések"),
         "prefix": "export.defaults",
         "keys": [
-            {"key": "frame_count", "label": "Képkockák száma",   "type": "int",
+            {"key": "frame_count", "label": tr("Képkockák száma"),   "type": "int",
              "default": 40, "range": (4, 300),
-             "desc": "Több → simább animáció, de lassabb generálás és nagyobb fájl."},
-            {"key": "fps",         "label": "FPS",               "type": "float",
+             "desc": tr("Több → simább animáció, de lassabb generálás és nagyobb fájl.")},
+            {"key": "fps",         "label": tr("FPS"),               "type": "float",
              "default": 25.0, "range": (1.0, 60.0), "decimals": 2, "step": 1.0,
-             "desc": "Lejátszási sebesség. MP4: 24/25/30. GIF: max ~50 fps."},
-            {"key": "method",      "label": "Morph módszer",     "type": "choice",
+             "desc": tr("Lejátszási sebesség. MP4: 24/25/30. GIF: max ~50 fps.")},
+            {"key": "method",      "label": tr("Morph módszer"),     "type": "choice",
              "default": "Delaunay háromszög",
              "choices": ["Delaunay háromszög", "Optikai folyam", "Homográfia"],
-             "desc": "Alapértelmezett morph módszer az Export lapfülön."},
-            {"key": "easing",      "label": "Easing görbe",      "type": "choice",
+             "desc": tr("Alapértelmezett morph módszer az Export lapfülön.")},
+            {"key": "easing",      "label": tr("Easing görbe"),      "type": "choice",
              "default": "S-görbe",
              "choices": ["Lineáris", "Lassú start", "Lassú vége", "S-görbe"],
-             "desc": "Alapértelmezett animáció-sebességgörbe."},
-            {"key": "ping_pong",   "label": "Ping-pong",         "type": "bool",
+             "desc": tr("Alapértelmezett animáció-sebességgörbe.")},
+            {"key": "ping_pong",   "label": tr("Ping-pong"),         "type": "bool",
              "default": False,
-             "desc": "A→B→A hurok: az animáció visszafelé is lejátszik."},
+             "desc": tr("A→B→A hurok: az animáció visszafelé is lejátszik.")},
         ],
     },
     # ── Farneback – Gyors ─────────────────────────────────────────────────────
     {
-        "section": "💨  Optikai folyam – Gyors preset",
+        "section": tr("💨  Optikai folyam – Gyors preset"),
         "prefix": "flow.presets.fast",
         "keys": [
-            {"key": "pyr_scale",  "label": "Piramis arány",    "type": "float",
+            {"key": "pyr_scale",  "label": tr("Piramis arány"),    "type": "float",
              "default": 0.5, "range": (0.1, 0.9), "decimals": 1, "step": 0.1,
-             "desc": "Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis."},
-            {"key": "levels",     "label": "Piramisszintek",   "type": "int",
+             "desc": tr("Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis.")},
+            {"key": "levels",     "label": tr("Piramisszintek"),   "type": "int",
              "default": 3, "range": (1, 8),
-             "desc": "Több szint → nagyobb elmozdulás is nyomozható."},
-            {"key": "winsize",    "label": "Ablakméret (px)",  "type": "int",
+             "desc": tr("Több szint → nagyobb elmozdulás is nyomozható.")},
+            {"key": "winsize",    "label": tr("Ablakméret (px)"),  "type": "int",
              "default": 15, "range": (5, 63),
-             "desc": "Átlagolási ablak. Nagyobb → robusztusabb, de elmosódottabb. (OpenCV tutorial: 15)"},
-            {"key": "iterations", "label": "Iterációk",        "type": "int",
+             "desc": tr("Átlagolási ablak. Nagyobb → robusztusabb, de elmosódottabb. (OpenCV tutorial: 15)")},
+            {"key": "iterations", "label": tr("Iterációk"),        "type": "int",
              "default": 3, "range": (1, 10),
-             "desc": "Iterációk száma szintenként. Több → pontosabb, lassabb."},
-            {"key": "poly_n",     "label": "Poly N",           "type": "int",
+             "desc": tr("Iterációk száma szintenként. Több → pontosabb, lassabb.")},
+            {"key": "poly_n",     "label": tr("Poly N"),           "type": "int",
              "default": 5, "range": (3, 9),
-             "desc": "Polinomexpanzió szomszédsága. 5 = gyors; 7 = simább (Farneback 2003)."},
-            {"key": "poly_sigma", "label": "Poly sigma",       "type": "float",
+             "desc": tr("Polinomexpanzió szomszédsága. 5 = gyors; 7 = simább (Farneback 2003).")},
+            {"key": "poly_sigma", "label": tr("Poly sigma"),       "type": "float",
              "default": 1.1, "range": (0.5, 3.0), "decimals": 1, "step": 0.1,
-             "desc": "poly_n=5 → 1.1; poly_n=7 → 1.5 ajánlott (Farneback 2003)."},
+             "desc": tr("poly_n=5 → 1.1; poly_n=7 → 1.5 ajánlott (Farneback 2003).")},
         ],
     },
     # ── Farneback – Normál ────────────────────────────────────────────────────
     {
-        "section": "💨  Optikai folyam – Normál preset",
+        "section": tr("💨  Optikai folyam – Normál preset"),
         "prefix": "flow.presets.normal",
         "keys": [
-            {"key": "pyr_scale",  "label": "Piramis arány",    "type": "float",
+            {"key": "pyr_scale",  "label": tr("Piramis arány"),    "type": "float",
              "default": 0.5, "range": (0.1, 0.9), "decimals": 1, "step": 0.1,
-             "desc": "Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis."},
-            {"key": "levels",     "label": "Piramisszintek",   "type": "int",
+             "desc": tr("Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis.")},
+            {"key": "levels",     "label": tr("Piramisszintek"),   "type": "int",
              "default": 4, "range": (1, 8),
-             "desc": "Több szint → nagyobb elmozdulás is nyomozható. Normál: 4."},
-            {"key": "winsize",    "label": "Ablakméret (px)",  "type": "int",
+             "desc": tr("Több szint → nagyobb elmozdulás is nyomozható. Normál: 4.")},
+            {"key": "winsize",    "label": tr("Ablakméret (px)"),  "type": "int",
              "default": 21, "range": (5, 63),
-             "desc": "Átlagolási ablak mérete. Nagyobb → robusztusabb, de elmosódottabb."},
-            {"key": "iterations", "label": "Iterációk",        "type": "int",
+             "desc": tr("Átlagolási ablak mérete. Nagyobb → robusztusabb, de elmosódottabb.")},
+            {"key": "iterations", "label": tr("Iterációk"),        "type": "int",
              "default": 4, "range": (1, 10),
-             "desc": "Iterációk száma szintenként. Több → pontosabb, lassabb."},
-            {"key": "poly_n",     "label": "Poly N",           "type": "int",
+             "desc": tr("Iterációk száma szintenként. Több → pontosabb, lassabb.")},
+            {"key": "poly_n",     "label": tr("Poly N"),           "type": "int",
              "default": 7, "range": (3, 9),
-             "desc": "Polinomexpanzió szomszédsága. 7 = simább eredmény (Farneback 2003)."},
-            {"key": "poly_sigma", "label": "Poly sigma",       "type": "float",
+             "desc": tr("Polinomexpanzió szomszédsága. 7 = simább eredmény (Farneback 2003).")},
+            {"key": "poly_sigma", "label": tr("Poly sigma"),       "type": "float",
              "default": 1.5, "range": (0.5, 3.0), "decimals": 1, "step": 0.1,
-             "desc": "poly_n=7 esetén 1.5 ajánlott (Farneback 2003)."},
+             "desc": tr("poly_n=7 esetén 1.5 ajánlott (Farneback 2003).")},
         ],
     },
     # ── Farneback – Részletes ─────────────────────────────────────────────────
     {
-        "section": "💨  Optikai folyam – Részletes preset",
+        "section": tr("💨  Optikai folyam – Részletes preset"),
         "prefix": "flow.presets.detailed",
         "keys": [
-            {"key": "pyr_scale",  "label": "Piramis arány",    "type": "float",
+            {"key": "pyr_scale",  "label": tr("Piramis arány"),    "type": "float",
              "default": 0.5, "range": (0.1, 0.9), "decimals": 1, "step": 0.1,
-             "desc": "Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis."},
-            {"key": "levels",     "label": "Piramisszintek",   "type": "int",
+             "desc": tr("Szintenkénti méretcsökkentés aránya. 0.5 = klasszikus piramis.")},
+            {"key": "levels",     "label": tr("Piramisszintek"),   "type": "int",
              "default": 5, "range": (1, 8),
-             "desc": "Több szint → nagyobb elmozdulás is nyomozható. Részletes: 5."},
-            {"key": "winsize",    "label": "Ablakméret (px)",  "type": "int",
+             "desc": tr("Több szint → nagyobb elmozdulás is nyomozható. Részletes: 5.")},
+            {"key": "winsize",    "label": tr("Ablakméret (px)"),  "type": "int",
              "default": 33, "range": (5, 63),
-             "desc": "Nagyobb ablak → simább, de kevésbé éles flow. Részletes: 33."},
-            {"key": "iterations", "label": "Iterációk",        "type": "int",
+             "desc": tr("Nagyobb ablak → simább, de kevésbé éles flow. Részletes: 33.")},
+            {"key": "iterations", "label": tr("Iterációk"),        "type": "int",
              "default": 5, "range": (1, 10),
-             "desc": "Iterációk száma szintenként. Részletes: 5 → legjobb minőség."},
-            {"key": "poly_n",     "label": "Poly N",           "type": "int",
+             "desc": tr("Iterációk száma szintenként. Részletes: 5 → legjobb minőség.")},
+            {"key": "poly_n",     "label": tr("Poly N"),           "type": "int",
              "default": 7, "range": (3, 9),
-             "desc": "Polinomexpanzió szomszédsága. 7 = simább eredmény (Farneback 2003)."},
-            {"key": "poly_sigma", "label": "Poly sigma",       "type": "float",
+             "desc": tr("Polinomexpanzió szomszédsága. 7 = simább eredmény (Farneback 2003).")},
+            {"key": "poly_sigma", "label": tr("Poly sigma"),       "type": "float",
              "default": 1.5, "range": (0.5, 3.0), "decimals": 1, "step": 0.1,
-             "desc": "poly_n=7 esetén 1.5 ajánlott (Farneback 2003)."},
+             "desc": tr("poly_n=7 esetén 1.5 ajánlott (Farneback 2003).")},
         ],
     },
 ]
@@ -441,7 +456,7 @@ class ColorSwatch(QPushButton):
         self._color   = QColor(hex_color) if QColor(hex_color).isValid() else QColor(default)
         self.setFixedSize(70, 24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Kattints a szín kiválasztásához\nJobb klikk: másolás / visszaállítás")
+        self.setToolTip(tr("Kattints a szín kiválasztásához\nJobb klikk: másolás / visszaállítás"))
         self._refresh_style()
         self.clicked.connect(self._pick)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -521,7 +536,7 @@ class RGBAWidget(QWidget):
         # Preview swatch
         self._preview = QLabel()
         self._preview.setFixedSize(28, 24)
-        self._preview.setToolTip("Jobb klikk: visszaállítás alapértelmezettre")
+        self._preview.setToolTip(tr("Jobb klikk: visszaállítás alapértelmezettre"))
         self._preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._preview.customContextMenuRequested.connect(self._context_menu)
         lay.addWidget(self._preview)
@@ -674,7 +689,7 @@ class ConfigEditorTab(QWidget):
         prof_lay.setContentsMargins(8, 4, 8, 4)
         prof_lay.setSpacing(6)
 
-        prof_lay.addWidget(QLabel("💾  Profil:"))
+        prof_lay.addWidget(QLabel(tr("💾  Profil:")))
 
         self._prof_combo = QComboBox()
         self._prof_combo.setMinimumWidth(180)
@@ -696,8 +711,8 @@ class ConfigEditorTab(QWidget):
 
         prof_lay.addSpacing(20)
 
-        btn_reset = QPushButton("↺  Minden visszaállítása")
-        btn_reset.setToolTip("Minden értéket visszaállít az alapértelmezetthez")
+        btn_reset = QPushButton(tr("↺  Minden visszaállítása"))
+        btn_reset.setToolTip(tr("Minden értéket visszaállít az alapértelmezetthez"))
         btn_reset.setStyleSheet(
             "QPushButton{color:#e8a020;} QPushButton:hover{color:#ffc060;}")
         btn_reset.clicked.connect(self._reset_all)
@@ -741,13 +756,13 @@ class ConfigEditorTab(QWidget):
 
         apply_lay.addStretch()
 
-        note = QLabel("ℹ  Színek újraindítás után lépnek életbe.")
+        note = QLabel(tr("ℹ  Színek újraindítás után lépnek életbe."))
         note.setStyleSheet("color:#5a8a5a; font-size:10px;")
         apply_lay.addWidget(note)
 
         apply_lay.addSpacing(10)
 
-        self._btn_save = QPushButton("💾  Mentés   Ctrl+S")
+        self._btn_save = QPushButton(tr("💾  Mentés   Ctrl+S"))
         self._btn_save.setStyleSheet(
             "QPushButton{background:#2e7d32; color:#eee; font-weight:bold;"
             "padding:4px 14px; border-radius:4px; border:none;}"
@@ -901,7 +916,7 @@ class ConfigEditorTab(QWidget):
     # ── Módosítás jelző ───────────────────────────────────────────────────────
 
     def _mark_modified(self, *_):
-        self._status_lbl.setText("⚠  Nem mentett változtatások")
+        self._status_lbl.setText(tr("⚠  Nem mentett változtatások"))
         self._status_lbl.setStyleSheet("color:#e8a020; font-size:11px;")
 
     def _mark_saved(self, msg: str = "✓  Mentve"):
@@ -946,8 +961,8 @@ class ConfigEditorTab(QWidget):
                     w.setValue(int(value))
                 elif isinstance(w, QDoubleSpinBox):
                     w.setValue(float(value))
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback; traceback.print_exc()
 
     def _load_from_config(self):
         """Betölti a jelenlegi cfg() értékeket minden widgetbe."""
@@ -957,7 +972,7 @@ class ConfigEditorTab(QWidget):
                 full_key = f"{prefix}.{kd['key']}"
                 current  = cfg(full_key, kd["default"])
                 self._apply_flat({full_key: current})
-        self._status_lbl.setText("")
+        self._status_lbl.setText(tr(""))
 
     # ── TOML írás ─────────────────────────────────────────────────────────────
 
