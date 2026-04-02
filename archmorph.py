@@ -68,7 +68,7 @@ from PyQt6.QtGui import (
     QAction, QColor, QFont, QImage, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QGroupBox, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSplitter, QSpinBox, QStackedWidget,
@@ -89,6 +89,13 @@ try:
 except ImportError:
     ConfigEditorTab = None  # type: ignore[assignment,misc]
     _HAS_CONFIG_EDITOR = False
+
+try:
+    from crop_dialog import CropDialog
+    _HAS_CROP_DIALOG = True
+except ImportError:
+    CropDialog = None        # type: ignore[assignment,misc]
+    _HAS_CROP_DIALOG = False
 
 
 try:
@@ -2375,75 +2382,54 @@ class MainWindow(QMainWindow):
         tb.addAction(act_open)
         tb.addSeparator()
 
-        act_crop = QAction(tr("✂  Közös terület"), self)
+        act_crop = QAction(tr("✂  Képvágás"), self)
         act_crop.setToolTip(
-            tr("Mindkét képet a közös, átfedő területre vágja.\n"
-               "A kép A homográfiával B koordinátájába vetítődik,\n"
-               "majd mindkettő a metszet-területre kerül vágásra.\n"
-               "Szükséges: legalább 4 pontpár."))
+            tr("Interaktív képvágó megnyitása.\n"
+               "Rajzolj téglalapot mindkét képre,\n"
+               "majd vágja és méretegyezteti őket."))
         act_crop.triggered.connect(self._crop_to_overlap)
         tb.addAction(act_crop)
 
     def _crop_to_overlap(self) -> None:
-        """Mindkét képet a homográfia alapján számított közös területre vágja."""
+        """Interaktív képvágó párbeszédablak megnyitása."""
         if self.project.image_a is None or self.project.image_b is None:
             QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
             return
-        n = len(self.project.anchor_points_a)
-        if n < 4:
-            QMessageBox.warning(
-                self, tr("Kevés pontpár"),
-                tr("A közös terület meghatározásához legalább 4 pontpár szükséges.\n"
-                   f"Jelenleg: {n} pár.  Adj hozzá több pontpárt, majd próbáld újra!"))
+
+        if not _HAS_CROP_DIALOG:
+            QMessageBox.critical(self, tr("Hiba"),
+                                 "crop_dialog.py nem található.")
             return
 
-        ans = QMessageBox.question(
-            self, tr("Közös terület vágása"),
-            tr("Ez a művelet mindkét képet a közös átfedő területre vágja,\n"
-               "és a pontpárokat az új képmérethez igazítja.\n\n"
-               "Az eredeti képek a projekt-fájlban visszaállíthatók.\n\n"
-               "Folytatod?"),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if ans != QMessageBox.StandardButton.Yes:
+        dlg = CropDialog(self.project.image_a, self.project.image_b, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            img_a_out, img_b_out, new_pts_a, new_pts_b = crop_images_to_overlap(
-                self.project.image_a,
-                self.project.image_b,
-                [(float(p[0]), float(p[1])) for p in self.project.anchor_points_a],
-                [(float(p[0]), float(p[1])) for p in self.project.anchor_points_b],
-            )
-        except Exception as exc:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, tr("Vágási hiba"), str(exc))
+        img_a_out, img_b_out = dlg.get_results()
+        if img_a_out is None or img_b_out is None:
             return
-        finally:
-            QApplication.restoreOverrideCursor()
 
-        # Undo mentés (kézzel)
+        # Undo mentése a vágás előtti állapotról
         self.editor_tab.point_editor._push_undo()
 
-        # Projekt frissítése
-        self.project.image_a           = img_a_out
-        self.project.image_b           = img_b_out
-        self.project.anchor_points_a   = [list(p) for p in new_pts_a]
-        self.project.anchor_points_b   = [list(p) for p in new_pts_b]
-        # Elmentett illesztési nyers adatok törlése (már nem érvényes koordinátán)
-        self.project.raw_matches_a     = []
-        self.project.raw_matches_b     = []
-        self.project.raw_inlier_mask   = []
+        # Képek cseréje
+        self.project.image_a = img_a_out
+        self.project.image_b = img_b_out
+
+        # Pontpárok törlése – a vágás után a koordináták már nem érvényesek
+        self.project.anchor_points_a = []
+        self.project.anchor_points_b = []
+        self.project.raw_matches_a   = []
+        self.project.raw_matches_b   = []
+        self.project.raw_inlier_mask = []
 
         # UI frissítése
         self.editor_tab.load_images()
         self.editor_tab.refresh_views()
 
         h, w = img_a_out.shape[:2]
-        n_pairs = len(new_pts_a)
         self.statusBar().showMessage(
-            tr("✂  Vágás kész  –  ") +
-            f"{w}×{h} px  |  {n_pairs} " + tr("pontpár megmaradt"))
+            tr("✂  Vágás kész  –  ") + f"{w}×{h} px")
 
     def _apply_dark_theme(self) -> None:
         self.setStyleSheet("""
