@@ -1497,6 +1497,9 @@ class AutomaticModeTab(QWidget):
 # ── AdvancedEditorTab  (a PointEditorWidget-et használja) ───────────────────
 
 class AdvancedEditorTab(QWidget):
+
+    crop_requested = pyqtSignal()   # főablak _crop_to_overlap()-jához
+
     def __init__(self, settings: AppSettings, project: ProjectState) -> None:
         super().__init__()
         self.settings, self.project = settings, project
@@ -1506,6 +1509,33 @@ class AdvancedEditorTab(QWidget):
         root = QVBoxLayout(self)
         root.setSpacing(4)
         root.setContentsMargins(4, 4, 4, 4)
+
+        # ── Vágás eszközsáv (képek betöltése után azonnal elérhető) ──────
+        crop_bar = QHBoxLayout()
+        crop_bar.setSpacing(6)
+
+        self._btn_crop = QPushButton(tr("✂  Képvágás"))
+        self._btn_crop.setToolTip(tr(
+            "Interaktív képvágó megnyitása.\n"
+            "Rajzolj téglalapot mindkét képre, majd vágja\n"
+            "és egyforma méretre hozza őket.\n\n"
+            "Használd a pontkeresés ELŐTT, hogy mindkét kép\n"
+            "pontosan ugyanazt a területet mutassa."))
+        self._btn_crop.setStyleSheet(
+            "QPushButton{background:#1a4a6a; color:#7fcfff; font-weight:bold;"
+            "padding:4px 14px; border-radius:4px; border:1px solid #2a6a9a;}"
+            "QPushButton:hover{background:#205878; color:#aaddff;}"
+            "QPushButton:disabled{background:#1e2430; color:#446;}")
+        self._btn_crop.clicked.connect(self.crop_requested.emit)
+
+        crop_bar.addWidget(self._btn_crop)
+        crop_bar.addStretch()
+
+        lbl_tip = QLabel(tr("← Vágd le a képeket először, majd keress pontpárokat"))
+        lbl_tip.setStyleSheet("color:#446a7a; font-size:10px; font-style:italic;")
+        crop_bar.addWidget(lbl_tip)
+
+        root.addLayout(crop_bar)
 
         # ── Pontszerkesztő (külön modul) ──────────────────────────────────
         self.point_editor = PointEditorWidget(self.project)
@@ -2222,6 +2252,7 @@ class MainWindow(QMainWindow):
             lambda p: self._load_image_from_path(p, "A"))
         self.editor_tab.point_editor.image_b_drop_requested.connect(
             lambda p: self._load_image_from_path(p, "B"))
+        self.editor_tab.crop_requested.connect(self._crop_to_overlap)
 
         self.tabs.addTab(self.auto_tab,    tr("⚡  Automata illesztés"))
         self.tabs.addTab(self.editor_tab,  tr("✏️  Pontszerkesztő"))

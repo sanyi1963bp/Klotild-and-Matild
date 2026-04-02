@@ -67,6 +67,8 @@ class CropCanvas(QWidget):
         self._d0_img:  Optional[QPointF] = None   # húzás kezdete kép-koordinátában
         self._d0_wgt:  Optional[QPointF] = None   # húzás kezdete widget-koordinátában
         self._rect0:   Optional[QRectF]  = None   # téglalap a húzás kezdetén
+        self._resize_dist0: float        = 1.0    # sarok–centrum távolság a resize indulásakor
+        self._resize_ctr:   QPointF      = QPointF()  # centrum a resize indulásakor
 
         self.setMinimumSize(300, 220)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -213,6 +215,17 @@ class CropCanvas(QWidget):
             self._corner  = c
             self._d0_wgt  = pos
             self._rect0   = QRectF(self._rect) if self._rect else None
+            # A centrum és a saroktávolság rögzítése a skálázáshoz
+            if self._rect0:
+                ctr = self._i2w(self._rect0.center())
+                corner_pt = self._corners_w()[c]
+                dx0 = corner_pt.x() - ctr.x()
+                dy0 = corner_pt.y() - ctr.y()
+                self._resize_dist0 = (dx0 ** 2 + dy0 ** 2) ** 0.5
+                self._resize_ctr   = self._rect0.center()   # kép-koordináta
+            else:
+                self._resize_dist0 = 1.0
+                self._resize_ctr   = QPointF()
         elif self._hit_inside(pos):
             self._state   = "moving"
             self._d0_img  = ipos
@@ -264,31 +277,30 @@ class CropCanvas(QWidget):
             self.rect_changed.emit()
             self.update()
 
-        # ── Átméretezés ──────────────────────────────────────────────────────
-        elif self._state == "resizing" and self._d0_wgt is not None and self._rect0 is not None:
-            delta = pos - self._d0_wgt
-            r0w   = QRectF(self._i2w(self._rect0.topLeft()),
-                           self._i2w(self._rect0.bottomRight())).normalized()
-            rw    = QRectF(r0w)
-            c     = self._corner
+        # ── Átméretezés (centrum körüli, arányos skálázás) ───────────────────
+        elif self._state == "resizing" and self._rect0 is not None and self._resize_dist0 > 0:
+            # Az egér aktuális távolsága a centrum widget-koordinátájától
+            ctr_w = self._i2w(self._resize_ctr)
+            dx    = pos.x() - ctr_w.x()
+            dy    = pos.y() - ctr_w.y()
+            dist  = (dx ** 2 + dy ** 2) ** 0.5
 
-            if   c == 0: rw.setTopLeft(    r0w.topLeft()     + delta)
-            elif c == 1: rw.setTopRight(   r0w.topRight()    + delta)
-            elif c == 2: rw.setBottomRight(r0w.bottomRight() + delta)
-            elif c == 3: rw.setBottomLeft( r0w.bottomLeft()  + delta)
-            rw = rw.normalized()
+            # Skálafaktor: aktuális / induló távolság
+            scale = max(dist / self._resize_dist0, 0.05)
 
-            # Oldalarány kényszer
-            if self._aspect and rw.height() > 1:
-                new_h = rw.width() / self._aspect
-                if c in (0, 1):          # felső sarok → alját rögzítjük
-                    rw.setTop(rw.bottom() - new_h)
-                else:                    # alsó sarok → tetejét rögzítjük
-                    rw.setBottom(rw.top() + new_h)
+            # Eredeti félméretek kép-koordinátában
+            half_w0 = self._rect0.width()  / 2
+            half_h0 = self._rect0.height() / 2
 
-            # Widget → kép koordináta
-            self._rect = QRectF(self._w2i(rw.topLeft()),
-                                self._w2i(rw.bottomRight())).normalized()
+            new_hw = half_w0 * scale
+            new_hh = half_h0 * scale
+
+            # Oldalarány érvényesítése (ha az aspect be van állítva)
+            if self._aspect and self._aspect > 0:
+                new_hh = new_hw / self._aspect
+
+            cx, cy = self._resize_ctr.x(), self._resize_ctr.y()
+            self._rect = QRectF(cx - new_hw, cy - new_hh, new_hw * 2, new_hh * 2)
             self.rect_changed.emit()
             self.update()
 
