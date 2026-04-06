@@ -42,7 +42,7 @@ from PyQt6.QtGui import (
     QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
 )
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QPushButton,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
     QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -138,6 +138,7 @@ class PointEditorCanvas(QWidget):
 
     point_added                 = pyqtSignal(float, float)
     point_moved                 = pyqtSignal(int, float, float)
+    curve_done                  = pyqtSignal(list)   # [(x,y)…] képkoordban
     point_deleted               = pyqtSignal(int)
     points_delete_multi_requested = pyqtSignal()
     point_selected              = pyqtSignal(int)
@@ -204,6 +205,10 @@ class PointEditorCanvas(QWidget):
         self._drag_hover: bool = False
         self.setAcceptDrops(True)
 
+        # Vonallánc / ív rajzolás
+        self._draw_mode:  str                      = "point"  # "point"|"polyline"|"arc"
+        self._curve_pts:  List[Tuple[float,float]] = []       # csúcsok képkoordban
+
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
@@ -253,6 +258,28 @@ class PointEditorCanvas(QWidget):
         self._roi_mode  = ""
         self.update()
         self.roi_rect_changed.emit(None)
+
+    # ── Vonallánc / ív rajzolás – publikus API ───────────────────────────────
+
+    def set_draw_mode(self, mode: str) -> None:
+        """'point' | 'polyline' | 'arc' – módváltáskor töröl minden félkész görbét."""
+        if mode != self._draw_mode:
+            self._draw_mode = mode
+            self._curve_pts = []
+            self.update()
+
+    def cancel_curve(self) -> None:
+        """Félkész görbét töröl (pl. ha a másik canvas is törli)."""
+        self._curve_pts = []
+        self.update()
+
+    def _finish_curve(self) -> None:
+        """Görbe lezárása: curve_done jel küldése, ha van elég csúcs."""
+        pts = list(self._curve_pts)
+        self._curve_pts = []
+        self.update()
+        if len(pts) >= 2:
+            self.curve_done.emit(pts)
 
     # ── Tartós téglalap-ROI – belső segédek ─────────────────────────────────
 
@@ -375,6 +402,12 @@ class PointEditorCanvas(QWidget):
 
         # ── Jobb gomb ────────────────────────────────────────────────────────
         if btn == Qt.MouseButton.RightButton:
+            # Görbe módban: jobb klikk = utolsó csúcs törlése (vagy mégse)
+            if self._draw_mode in ("polyline", "arc"):
+                if self._curve_pts:
+                    self._curve_pts.pop()
+                    self.update()
+                return
             idx = self._hit_test(wx, wy)
             if idx >= 0:
                 self._show_context_menu(idx, event.globalPosition().toPoint())
@@ -389,6 +422,19 @@ class PointEditorCanvas(QWidget):
         # ── Bal gomb ─────────────────────────────────────────────────────────
         if btn == Qt.MouseButton.LeftButton:
             ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+            # ── Görbe rajzolás (vonallánc / ív) ─────────────────────────────
+            if self._draw_mode in ("polyline", "arc") and not ctrl:
+                coords = self._w2i(wx, wy)
+                if coords is not None:
+                    self._curve_pts.append(coords)
+                    # Ívnél 3. csúcs után automatikusan kész
+                    if self._draw_mode == "arc" and len(self._curve_pts) == 3:
+                        self._finish_curve()
+                    else:
+                        self.update()
+                return
+
             # ── ROI fogópont / mozgatás ── (Ctrl nélkül, ROI létezik) ────────
             if not ctrl and self._roi_img is not None:
                 handle = self._hit_roi_handle(wx, wy)
@@ -430,11 +476,25 @@ class PointEditorCanvas(QWidget):
         """
         Ctrl+dupla-klikk sokszög módban → sokszög lezárása + ROI menü.
         Dupla kattintás üres területen (Ctrl nélkül) → új pontpár hozzáadása.
+        Dupla kattintás vonallánc módban → görbe lezárása.
         """
         if event.button() == Qt.MouseButton.LeftButton:
             wx = float(event.position().x())
             wy = float(event.position().y())
             ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+            # ── Vonallánc mód: dupla klikk = lezárás ────────────────────────
+            if self._draw_mode == "polyline" and not ctrl:
+                # A Press esemény már hozzáadta az utolsó csúcsot — eltávolítjuk
+                if self._curve_pts:
+                    self._curve_pts.pop()
+                if len(self._curve_pts) >= 2:
+                    self._finish_curve()
+                else:
+                    self._curve_pts = []
+                    self.update()
+                super().mouseDoubleClickEvent(event)
+                return
 
             # Ctrl+dupla-klikk sokszög módban → lezárás
             if ctrl and self._poly_mode and len(self._poly_pts) >= 3:
@@ -483,9 +543,9 @@ class PointEditorCanvas(QWidget):
         wx = float(event.position().x())
         wy = float(event.position().y())
 
-        # Kurzorpozíció frissítése (sokszög preview vonalhoz)
+        # Kurzorpozíció frissítése (sokszög + görbe preview vonalhoz)
         self._cursor_pos = (wx, wy)
-        if self._poly_mode:
+        if self._poly_mode or (self._draw_mode in ("polyline", "arc") and self._curve_pts):
             self.update()
 
         # ── ROI drag: mozgatás vagy átméretezés ──────────────────────────────
@@ -744,17 +804,29 @@ class PointEditorCanvas(QWidget):
             event.accept()
 
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            # Enter → sokszög lezárása (ha aktív és van elég csúcs)
-            if self._poly_mode and len(self._poly_pts) >= 3:
+            # Enter → görbe lezárása ha görbe módban vagyunk
+            if self._draw_mode == "polyline" and len(self._curve_pts) >= 2:
+                self._finish_curve()
+            elif self._poly_mode and len(self._poly_pts) >= 3:
                 self._close_polygon()
             event.accept()
 
         elif key == Qt.Key.Key_Escape:
-            # Escape → sokszög megszakítása
-            if self._poly_mode:
+            # Escape → félkész görbe vagy sokszög megszakítása
+            if self._draw_mode in ("polyline", "arc") and self._curve_pts:
+                self._curve_pts = []
+                self.update()
+            elif self._poly_mode:
                 self._poly_mode    = False
                 self._poly_pts     = []
                 self._display_poly = []
+                self.update()
+            event.accept()
+
+        elif key == Qt.Key.Key_Backspace:
+            # Backspace → utolsó csúcs törlése görbe módban
+            if self._draw_mode in ("polyline", "arc") and self._curve_pts:
+                self._curve_pts.pop()
                 self.update()
             event.accept()
 
@@ -1007,6 +1079,50 @@ class PointEditorCanvas(QWidget):
             # Lezárt sokszög: menü megjelenéséig látható
             _draw_poly(self._display_poly, _C_POLY_DONE, closed=True)
 
+        # ── Vonallánc / ív rajzolás overlay ─────────────────────────────────
+        if self._draw_mode in ("polyline", "arc") and self._curve_pts:
+            c_curve = QColor("#22ddcc") if self._draw_mode == "polyline" else QColor("#ffaa44")
+            pen_solid = QPen(c_curve, 2, Qt.PenStyle.SolidLine)
+            pen_dash  = QPen(c_curve, 1, Qt.PenStyle.DashLine)
+            # Widget-koordinátákra konvertálás
+            pts_w = [self._i2w(x, y) for x, y in self._curve_pts]
+            pts_w = [p for p in pts_w if p is not None]
+            if pts_w:
+                # Összekötő élek
+                painter.setPen(pen_solid)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for k in range(len(pts_w) - 1):
+                    ax, ay = pts_w[k]
+                    bx, by = pts_w[k + 1]
+                    painter.drawLine(int(ax), int(ay), int(bx), int(by))
+                # Preview vonal az egér felé
+                lx, ly = pts_w[-1]
+                cx, cy = self._cursor_pos
+                painter.setPen(pen_dash)
+                painter.drawLine(int(lx), int(ly), int(cx), int(cy))
+                # Csúcspontok (első nagyobb)
+                painter.setPen(QPen(c_curve, 2))
+                for k, (px, py) in enumerate(pts_w):
+                    r = 7 if k == 0 else 4
+                    painter.setBrush(QBrush(c_curve) if k == 0 else Qt.BrushStyle.NoBrush)
+                    painter.drawEllipse(int(px) - r, int(py) - r, r * 2, r * 2)
+            # Állapot / tipp szöveg
+            n_pts = len(self._curve_pts)
+            if self._draw_mode == "polyline":
+                hint = (tr(f"Vonallánc – {n_pts} csúcs  |  "
+                           "Klikk: csúcs  |  2×klikk / Enter: kész  "
+                           "|  Jobb klikk / Backspace: töröl  |  Esc: mégse"))
+            else:
+                labels = [tr("Ív – klikk: kezdőpont"),
+                          tr("Ív – klikk: közepe (az ívon)"),
+                          tr("Ív – klikk: végpont  |  Jobb klikk: töröl")]
+                hint = labels[min(n_pts, 2)]
+            painter.setPen(QPen(c_curve, 1))
+            font_c = QFont()
+            font_c.setPointSize(9)
+            painter.setFont(font_c)
+            painter.drawText(6, self.height() - 8, hint)
+
         # ── Drag & Drop hover kiemelés ───────────────────────────────────────
         if self._drag_hover:
             c = QColor("#44aaff")
@@ -1091,6 +1207,10 @@ class PointEditorWidget(QWidget):
         self._undo_stack:        List[Tuple[List, List]] = []
         self._roi_last_backend:  str  = "SuperPoint + LightGlue"
         self._roi_delete_in_roi: bool = False
+        # Görbe rajzolás állapot
+        self._draw_mode:         str                      = "point"
+        self._pending_curve_a:   Optional[List]           = None
+        self._pending_curve_b:   Optional[List]           = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1167,7 +1287,76 @@ class PointEditorWidget(QWidget):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
 
+        # ── Görbe rajzolás eszköztár ─────────────────────────────────────────
+        cbar = QHBoxLayout()
+        cbar.setSpacing(6)
+
+        _MODE_BASE = ("QPushButton{padding:0 10px;border-radius:4px;font-size:12px;"
+                      "border:1px solid #444;}"
+                      "QPushButton:checked{border:1px solid #22ddcc;}")
+        _btn_style = lambda col: (
+            f"QPushButton{{background:#1e2430;color:#bbb;padding:0 10px;"
+            f"border-radius:4px;font-size:12px;border:1px solid #444;}}"
+            f"QPushButton:checked{{background:{col};color:#111;border:1px solid {col};}}"
+            f"QPushButton:hover{{background:#2a3040;}}"
+        )
+
+        self.btn_mode_point    = QPushButton(tr("• Pont"))
+        self.btn_mode_polyline = QPushButton(tr("— Vonallánc"))
+        self.btn_mode_arc      = QPushButton(tr("⌒ Ív"))
+        for btn, col in [(self.btn_mode_point, "#aaa"),
+                         (self.btn_mode_polyline, "#22ddcc"),
+                         (self.btn_mode_arc, "#ffaa44")]:
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.setStyleSheet(_btn_style(col))
+        self.btn_mode_point.setChecked(True)
+        self.btn_mode_point.setToolTip(
+            tr("Normál mód: dupla kattintással adj hozzá pontpárokat"))
+        self.btn_mode_polyline.setToolTip(
+            tr("Vonallánc: rajzolj töröttvonalat mindkét képre → "
+               "automatikusan felosztja pontpárokra"))
+        self.btn_mode_arc.setToolTip(
+            tr("Ív: 3 kattintással definiálj körívvet (kezdő, közepe, vég) → "
+               "felosztja pontpárokra"))
+
+        self.btn_mode_point.clicked.connect(
+            lambda: self._set_draw_mode("point"))
+        self.btn_mode_polyline.clicked.connect(
+            lambda: self._set_draw_mode("polyline"))
+        self.btn_mode_arc.clicked.connect(
+            lambda: self._set_draw_mode("arc"))
+
+        lbl_n = QLabel(tr("Pontok/görbe:"))
+        lbl_n.setStyleSheet("color:#888;font-size:12px;")
+        self.spin_subdiv = QSpinBox()
+        self.spin_subdiv.setRange(3, 60)
+        self.spin_subdiv.setValue(10)
+        self.spin_subdiv.setFixedWidth(52)
+        self.spin_subdiv.setFixedHeight(26)
+        self.spin_subdiv.setToolTip(
+            tr("Hány pontpárt hozzon létre egy vonallánc/ív szakaszból"))
+        self.spin_subdiv.setStyleSheet(
+            "QSpinBox{background:#1e2430;color:#ddd;border:1px solid #444;"
+            "border-radius:4px;padding:0 4px;}"
+            "QSpinBox::up-button,QSpinBox::down-button{width:14px;}")
+
+        self.lbl_curve_status = QLabel("")
+        self.lbl_curve_status.setStyleSheet(
+            "color:#22ddcc;font-size:12px;font-weight:bold;")
+
+        cbar.addWidget(self.btn_mode_point)
+        cbar.addWidget(self.btn_mode_polyline)
+        cbar.addWidget(self.btn_mode_arc)
+        cbar.addSpacing(10)
+        cbar.addWidget(lbl_n)
+        cbar.addWidget(self.spin_subdiv)
+        cbar.addSpacing(10)
+        cbar.addWidget(self.lbl_curve_status)
+        cbar.addStretch()
+
         root.addLayout(bar)
+        root.addLayout(cbar)
         root.addWidget(splitter, stretch=1)
 
         # ── Szignálok ────────────────────────────────────────────────────────
@@ -1204,6 +1393,9 @@ class PointEditorWidget(QWidget):
         self.canvas_b.middle_clicked.connect(self._on_middle_click)
         self.canvas_a.undo_requested.connect(self._pop_undo)
         self.canvas_b.undo_requested.connect(self._pop_undo)
+        # Görbe kész jelek
+        self.canvas_a.curve_done.connect(self._on_curve_done_a)
+        self.canvas_b.curve_done.connect(self._on_curve_done_b)
 
     # ── Publikus API ─────────────────────────────────────────────────────────
 
@@ -1279,6 +1471,150 @@ class PointEditorWidget(QWidget):
         self._sync()
         self.points_changed.emit()
         return True
+
+    # ── Görbe rajzolás logika ────────────────────────────────────────────────
+
+    def _set_draw_mode(self, mode: str) -> None:
+        """Rajzolási mód váltása: pont / vonallánc / ív."""
+        self._draw_mode      = mode
+        self._pending_curve_a = None
+        self._pending_curve_b = None
+        self.canvas_a.set_draw_mode(mode)
+        self.canvas_b.set_draw_mode(mode)
+        # Gomb állapotok
+        self.btn_mode_point.setChecked(mode == "point")
+        self.btn_mode_polyline.setChecked(mode == "polyline")
+        self.btn_mode_arc.setChecked(mode == "arc")
+        self._update_curve_status()
+
+    def _update_curve_status(self) -> None:
+        """Állapotsor frissítése görbe módban."""
+        if self._draw_mode == "point":
+            self.lbl_curve_status.setText("")
+            return
+        if self._pending_curve_a is None:
+            n = "ív" if self._draw_mode == "arc" else "vonalat"
+            self.lbl_curve_status.setStyleSheet(
+                "color:#22ddcc;font-size:12px;font-weight:bold;")
+            self.lbl_curve_status.setText(
+                tr(f"← Rajzolj {n} az  A  képre"))
+        elif self._pending_curve_b is None:
+            n = "ív" if self._draw_mode == "arc" else "vonalat"
+            self.lbl_curve_status.setStyleSheet(
+                "color:#ffaa44;font-size:12px;font-weight:bold;")
+            self.lbl_curve_status.setText(
+                tr(f"✔ A kész  ·  Most rajzolj {n} a  B  képre"))
+        else:
+            self.lbl_curve_status.setText("")
+
+    def _on_curve_done_a(self, pts: list) -> None:
+        self._pending_curve_a = pts
+        # B oldalt is frissítjük a várakozási jelzéssel
+        self.canvas_b.set_draw_mode(self._draw_mode)
+        self._update_curve_status()
+        if self._pending_curve_b is not None:
+            self._commit_curves()
+
+    def _on_curve_done_b(self, pts: list) -> None:
+        self._pending_curve_b = pts
+        self._update_curve_status()
+        if self._pending_curve_a is not None:
+            self._commit_curves()
+
+    def _commit_curves(self) -> None:
+        """Mindkét görbe kész: felosztja és hozzáadja pontpárként."""
+        n   = self.spin_subdiv.value()
+        pa  = self._pending_curve_a
+        pb  = self._pending_curve_b
+        self._pending_curve_a = None
+        self._pending_curve_b = None
+        self._update_curve_status()
+
+        mode = self._draw_mode
+        if mode == "polyline":
+            pts_a = self._subdivide_polyline(pa, n)
+            pts_b = self._subdivide_polyline(pb, n)
+        elif mode == "arc" and len(pa) == 3 and len(pb) == 3:
+            pts_a = self._subdivide_arc(*pa, n)
+            pts_b = self._subdivide_arc(*pb, n)
+        else:
+            return
+
+        if not pts_a or not pts_b:
+            return
+
+        self._push_undo()
+        for (ax, ay), (bx, by) in zip(pts_a, pts_b):
+            self.project.anchor_points_a.append([ax, ay])
+            self.project.anchor_points_b.append([bx, by])
+        self._sync()
+        self.points_changed.emit()
+
+    # ── Görbe felosztó segédek ───────────────────────────────────────────────
+
+    @staticmethod
+    def _subdivide_polyline(pts: list, n: int) -> list:
+        """N egyenközű pontot mintavételez egy töröttvonal mentén (képkoord)."""
+        if n <= 0 or len(pts) < 2:
+            return list(pts)
+        if n == 1:
+            return [pts[0]]
+        # Kumulatív ívhosszak
+        lengths = [0.0]
+        for i in range(1, len(pts)):
+            dx = pts[i][0] - pts[i - 1][0]
+            dy = pts[i][1] - pts[i - 1][1]
+            lengths.append(lengths[-1] + math.hypot(dx, dy))
+        total = lengths[-1]
+        if total < 1e-9:
+            return [tuple(pts[0])] * n
+        result = []
+        for k in range(n):
+            t = total * k / (n - 1)
+            for seg in range(1, len(lengths)):
+                if lengths[seg] >= t - 1e-9:
+                    t0, t1 = lengths[seg - 1], lengths[seg]
+                    if t1 - t0 < 1e-9:
+                        result.append(tuple(pts[seg - 1]))
+                    else:
+                        alpha = (t - t0) / (t1 - t0)
+                        x = pts[seg-1][0] + alpha * (pts[seg][0] - pts[seg-1][0])
+                        y = pts[seg-1][1] + alpha * (pts[seg][1] - pts[seg-1][1])
+                        result.append((x, y))
+                    break
+            else:
+                result.append(tuple(pts[-1]))
+        return result
+
+    @staticmethod
+    def _subdivide_arc(p0, p1, p2, n: int) -> list:
+        """N egyenközű pontot mintavételez a P0-P1-P2 körívven (P1 az ívon van)."""
+        if n <= 0:
+            return []
+        if n == 1:
+            return [tuple(p0)]
+        ax, ay = p0;  bx, by = p1;  cx, cy = p2
+        D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if abs(D) < 1e-10:
+            # Kollineáris → egyenes vonal
+            return PointEditorWidget._subdivide_polyline([p0, p2], n)
+        ux = ((ax**2+ay**2)*(by-cy) + (bx**2+by**2)*(cy-ay) + (cx**2+cy**2)*(ay-by)) / D
+        uy = ((ax**2+ay**2)*(cx-bx) + (bx**2+by**2)*(ax-cx) + (cx**2+cy**2)*(bx-ax)) / D
+        r  = math.hypot(ax - ux, ay - uy)
+        a_start = math.atan2(ay - uy, ax - ux)
+        a_mid   = math.atan2(by - uy, bx - ux)
+        a_end   = math.atan2(cy - uy, cx - ux)
+        # Iránymeghatározás: az ív P1-en megy keresztül
+        m_ccw = (a_mid - a_start) % (2 * math.pi)
+        e_ccw = (a_end - a_start) % (2 * math.pi)
+        if e_ccw == 0:
+            e_ccw = 2 * math.pi
+        if m_ccw <= e_ccw:          # CCW
+            angles = [a_start + e_ccw * k / (n - 1) for k in range(n)]
+        else:                        # CW
+            sweep = (2 * math.pi - e_ccw) % (2 * math.pi) or 2 * math.pi
+            angles = [a_start - sweep * k / (n - 1) for k in range(n)]
+        return [(ux + r * math.cos(a), uy + r * math.sin(a)) for a in angles]
 
     # ── Tartós téglalap-ROI kezelés ──────────────────────────────────────────
 
