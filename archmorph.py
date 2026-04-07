@@ -482,6 +482,72 @@ def crop_images_to_overlap(
     return warped_a[r0:r1, c0:c1], image_b[r0:r1, c0:c1], c0, r0
 
 
+def detect_tilt_angle(image_bgr: np.ndarray) -> float:
+    """
+    Megpróbálja meghatározni a kép dőlési szögét Hough-egyenesek alapján.
+
+    A függőlegeshez közeli éleket keresi (±30° toleranciával), majd
+    mediánnal becsüli a szükséges korrekciós szöget.
+
+    Visszatér: szög fokokban (pozitív → óramutató járásával megegyező forgás).
+               Ha nem talál egyenest, 0.0-t ad vissza.
+    """
+    if cv2 is None:
+        return 0.0
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180,
+                            threshold=80, minLineLength=60, maxLineGap=10)
+    if lines is None:
+        return 0.0
+
+    angles: list[float] = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dy) < 1e-6:
+            continue  # vízszintes → kizárjuk
+        angle_from_vertical = float(np.degrees(np.arctan2(dx, dy)))
+        # Csak ±30°-on belüli vonalakat fogadunk el
+        if abs(angle_from_vertical) <= 30.0:
+            angles.append(angle_from_vertical)
+
+    if not angles:
+        return 0.0
+    return float(np.median(angles))
+
+
+def rotate_image_by_angle(image_bgr: np.ndarray, angle_deg: float) -> np.ndarray:
+    """
+    Elforgatja a képet `angle_deg` fokkal (óramutató irányában pozitív).
+    A canvas mérete megnő, hogy semelyik sarok se vágódjon le.
+    A hátterszín fekete (0, 0, 0).
+    """
+    if cv2 is None:
+        return image_bgr
+    h, w = image_bgr.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    M = cv2.getRotationMatrix2D((cx, cy), -angle_deg, 1.0)
+
+    # Új (nagyobb) vászonméret kiszámítása
+    cos_a = abs(M[0, 0])
+    sin_a = abs(M[0, 1])
+    new_w = int(h * sin_a + w * cos_a)
+    new_h = int(h * cos_a + w * sin_a)
+
+    # Fordítási korrekció (kép középre kerül az új vásznon)
+    M[0, 2] += (new_w - w) / 2.0
+    M[1, 2] += (new_h - h) / 2.0
+
+    return cv2.warpAffine(image_bgr, M, (new_w, new_h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT,
+                          borderValue=(0, 0, 0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def blend_same_size_images(a: np.ndarray, b: np.ndarray,
                             *, alpha: float = 0.5) -> np.ndarray:
     if cv2 is None:
@@ -2195,6 +2261,124 @@ class ExportTab(QWidget):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  Dőlés-korrekció dialógus
+# ════════════════════════════════════════════════════════════════════════════
+
+class TiltCorrectionDialog(QDialog):
+    """
+    Dőlés-korrekció párbeszédablak.
+
+    – Automatikusan megbecsüli a kép dőlési szögét Hough-egyenesek alapján.
+    – A felhasználó a spinboxban finomhangolhatja a szöget.
+    – Az „Alkalmazás" gomb a korrigált képet adja vissza.
+    """
+
+    def __init__(
+        self,
+        image_bgr: np.ndarray,
+        side: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr(f"Dőlés-korrekció – {'A' if side == 'a' else 'B'} kép"))
+        self.setMinimumSize(700, 500)
+        self._original = image_bgr.copy()
+        self._corrected: np.ndarray = image_bgr.copy()
+
+        # ── Elrendezés ──────────────────────────────────────────────────────
+        main_lay = QVBoxLayout(self)
+
+        # Előnézet
+        self._preview_label = QLabel()
+        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        main_lay.addWidget(self._preview_label, stretch=1)
+
+        # Vezérlők
+        ctrl_lay = QHBoxLayout()
+        main_lay.addLayout(ctrl_lay)
+
+        ctrl_lay.addWidget(QLabel(tr("Szög (fok):")))
+        self._spin = QDoubleSpinBox()
+        self._spin.setRange(-45.0, 45.0)
+        self._spin.setSingleStep(0.1)
+        self._spin.setDecimals(2)
+        self._spin.setSuffix("°")
+        self._spin.setFixedWidth(100)
+        ctrl_lay.addWidget(self._spin)
+
+        btn_detect = QPushButton(tr("🔍 Automatikus detektálás"))
+        btn_detect.setToolTip(tr("Hough-egyenesekkel becsüli meg a dőlési szöget"))
+        btn_detect.clicked.connect(self._auto_detect)
+        ctrl_lay.addWidget(btn_detect)
+
+        btn_reset = QPushButton(tr("↺ Visszaállítás"))
+        btn_reset.clicked.connect(self._reset_angle)
+        ctrl_lay.addWidget(btn_reset)
+
+        ctrl_lay.addStretch()
+
+        # Alkalmaz / Mégse
+        btn_lay = QHBoxLayout()
+        main_lay.addLayout(btn_lay)
+        btn_lay.addStretch()
+        btn_apply = QPushButton(tr("✔ Alkalmazás"))
+        btn_apply.setDefault(True)
+        btn_apply.clicked.connect(self.accept)
+        btn_lay.addWidget(btn_apply)
+        btn_cancel = QPushButton(tr("Mégse"))
+        btn_cancel.clicked.connect(self.reject)
+        btn_lay.addWidget(btn_cancel)
+
+        # Összekötés
+        self._spin.valueChanged.connect(self._update_preview)
+
+        # Első detektálás
+        self._auto_detect()
+
+    # ── Belső metódusok ─────────────────────────────────────────────────────
+
+    def _auto_detect(self) -> None:
+        angle = detect_tilt_angle(self._original)
+        self._spin.blockSignals(True)
+        self._spin.setValue(round(angle, 2))
+        self._spin.blockSignals(False)
+        self._update_preview()
+
+    def _reset_angle(self) -> None:
+        self._spin.setValue(0.0)
+
+    def _update_preview(self) -> None:
+        angle = self._spin.value()
+        if abs(angle) < 1e-4:
+            rotated = self._original
+        else:
+            rotated = rotate_image_by_angle(self._original, angle)
+        self._corrected = rotated
+
+        # QPixmap előnézet
+        h, w = rotated.shape[:2]
+        rgb = rotated[..., ::-1].copy()  # BGR → RGB
+        qi = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        px = QPixmap.fromImage(qi)
+        avail = self._preview_label.size()
+        scaled = px.scaled(avail, Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+        self._preview_label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_preview()
+
+    # ── Nyilvános API ────────────────────────────────────────────────────────
+
+    def corrected_image(self) -> np.ndarray:
+        """Az elfogadott (elforgatott) képet adja vissza."""
+        return self._corrected
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  Főablak
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -2415,6 +2599,24 @@ class MainWindow(QMainWindow):
         # ════════════════════════════════════════════════════════════════════
         tb.addWidget(_step_label("② Igazítás"))
 
+        act_tilt_a = QAction(tr("↕ Dőlés A"), self)
+        act_tilt_a.setToolTip(
+            tr("Dőlés-korrekció az A képen\n\n"
+               "Hough-egyenesekkel megbecsüli a kép ferdeségét,\n"
+               "majd elforgatja a képet a függőleges tengelyhez igazítva.\n"
+               "A GCP igazítás előtt érdemes elvégezni."))
+        act_tilt_a.triggered.connect(lambda: self._correct_tilt("a"))
+        tb.addAction(act_tilt_a)
+
+        act_tilt_b = QAction(tr("↕ Dőlés B"), self)
+        act_tilt_b.setToolTip(
+            tr("Dőlés-korrekció a B képen\n\n"
+               "Hough-egyenesekkel megbecsüli a kép ferdeségét,\n"
+               "majd elforgatja a képet a függőleges tengelyhez igazítva.\n"
+               "A GCP igazítás előtt érdemes elvégezni."))
+        act_tilt_b.triggered.connect(lambda: self._correct_tilt("b"))
+        tb.addAction(act_tilt_b)
+
         act_gcp = QAction(tr("📍  GCP igazítás"), self)
         act_gcp.setToolTip(
             tr("② GCP-alapú geometriai igazítás  ← AJÁNLOTT\n\n"
@@ -2446,6 +2648,51 @@ class MainWindow(QMainWindow):
 
         tb.addAction(act_save)
         tb.addAction(act_open)
+
+    # ── Dőlés-korrekció ────────────────────────────────────────────────────
+
+    def _correct_tilt(self, side: str) -> None:
+        """
+        Dőlés-korrekciós dialógust nyit az A vagy B képhez.
+
+        :param side: "a" vagy "b"
+        """
+        p = self.project
+        if side == "a":
+            img = p.image_a
+        else:
+            img = p.image_b
+
+        if img is None:
+            QMessageBox.information(
+                self,
+                tr("Nincs kép"),
+                tr(f"Töltsd be a{'z A' if side == 'a' else ' B'} képet először!"),
+            )
+            return
+
+        dlg = TiltCorrectionDialog(img, side, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        corrected = dlg.corrected_image()
+        angle = dlg._spin.value()
+
+        if side == "a":
+            p.image_a = corrected
+            p.image_a_is_modified = True
+        else:
+            p.image_b = corrected
+            p.image_b_is_modified = True
+
+        self.editor_tab.load_images()
+        self._update_title()
+        self.statusBar().showMessage(
+            tr(f"Dőlés-korrekció ({'A' if side == 'a' else 'B'} kép): "
+               f"{angle:+.2f}° elforgatva  –  új méret: "
+               f"{corrected.shape[1]}×{corrected.shape[0]} px"),
+            6000,
+        )
 
     # ── GCP-alapú geometriai igazítás ──────────────────────────────────────
 
