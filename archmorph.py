@@ -90,12 +90,13 @@ except ImportError:
     ConfigEditorTab = None  # type: ignore[assignment,misc]
     _HAS_CONFIG_EDITOR = False
 
+
 try:
-    from crop_dialog import CropDialog
-    _HAS_CROP_DIALOG = True
+    from gcp_dialog import GCPDialog
+    _HAS_GCP_DIALOG = True
 except ImportError:
-    CropDialog = None        # type: ignore[assignment,misc]
-    _HAS_CROP_DIALOG = False
+    GCPDialog = None         # type: ignore[assignment,misc]
+    _HAS_GCP_DIALOG = False
 
 
 try:
@@ -151,6 +152,10 @@ class ProjectState:
     aligned_image_a_to_b:   Optional[np.ndarray]       = None
     aligned_overlay_preview: Optional[np.ndarray]      = None
     exclusion_masks:        Dict[str, Any]             = field(default_factory=dict)
+    # True ha a memóriában lévő kép eltér a image_*_path-on lévő fájltól
+    # (pl. GCP warp vagy crop után) → mentéskor külön fájlba kell írni
+    image_a_is_modified:    bool                       = False
+    image_b_is_modified:    bool                       = False
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -209,100 +214,6 @@ def bgr_to_torch_image(image_bgr: np.ndarray, device: str):
     return tensor.to(device)
 
 
-
-
-def crop_images_to_overlap(
-    img_a: np.ndarray,
-    img_b: np.ndarray,
-    pts_a: List[Tuple[float, float]],
-    pts_b: List[Tuple[float, float]],
-) -> Tuple[np.ndarray, np.ndarray,
-           List[Tuple[float, float]], List[Tuple[float, float]]]:
-    """
-    A két képet a közös, mindkettőn megjelenő területre vágja.
-
-    Algoritmusa:
-      1. Homográfiát számít a pontpárokból (A → B tér).
-      2. Az A kép érvényes pixeleit betérképezi B koordináta-rendszerébe.
-      3. Megkeresi a B képpel való metszet bounding box-ját.
-      4. B-t közvetlenül, A warpolt verzióját ugyanerre vágja.
-      5. A pontkoordinátákat az új képméretre frissíti.
-
-    Visszatér:
-      (img_a_out, img_b_out, new_pts_a, new_pts_b)
-      – mindkét kép azonos pixelméretű lesz
-      – csak azok a pontpárok maradnak, amelyek a vágott képen belül esnek
-    """
-    if cv2 is None:
-        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
-    if len(pts_a) < 4:
-        raise ValueError(
-            "A közös terület meghatározásához legalább 4 pontpár szükséges.\n"
-            "Adj hozzá több pontpárt, majd próbáld újra!")
-
-    h_a, w_a = img_a.shape[:2]
-    h_b, w_b = img_b.shape[:2]
-
-    # ── 1. Homográfia: A → B tér ──────────────────────────────────────────────
-    src = np.float32(pts_a).reshape(-1, 1, 2)
-    dst = np.float32(pts_b).reshape(-1, 1, 2)
-    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-    if H is None:
-        raise RuntimeError(
-            "Nem sikerült homográfiát számítani a pontpárokból.\n"
-            "Ellenőrizd, hogy a pontpárok valóban megfelelő helyeken vannak!")
-
-    # ── 2. A érvényes maszkjának vetítése B-be ────────────────────────────────
-    mask_a = np.ones((h_a, w_a), dtype=np.uint8) * 255
-    warped_mask = cv2.warpPerspective(mask_a, H, (w_b, h_b),
-                                      flags=cv2.INTER_NEAREST,
-                                      borderMode=cv2.BORDER_CONSTANT,
-                                      borderValue=0)
-
-    # ── 3. Közös terület bounding box-a B terében ─────────────────────────────
-    ys, xs = np.where(warped_mask > 128)
-    if len(xs) == 0:
-        raise RuntimeError(
-            "A homográfia alapján a két képnek nincs átfedő területe.\n"
-            "Ellenőrizd a pontpárokat!")
-
-    x1 = max(0,   int(xs.min()))
-    x2 = min(w_b, int(xs.max()) + 1)
-    y1 = max(0,   int(ys.min()))
-    y2 = min(h_b, int(ys.max()) + 1)
-
-    if (x2 - x1) < 10 or (y2 - y1) < 10:
-        raise RuntimeError("Az átfedő terület túl kicsi a vágáshoz.")
-
-    # ── 4. A warpolt változata, majd vágás ────────────────────────────────────
-    warped_a  = cv2.warpPerspective(img_a, H, (w_b, h_b),
-                                    flags=cv2.INTER_LINEAR,
-                                    borderMode=cv2.BORDER_CONSTANT,
-                                    borderValue=(0, 0, 0))
-    img_a_out = warped_a[y1:y2, x1:x2].copy()
-    img_b_out = img_b   [y1:y2, x1:x2].copy()
-
-    # ── 5. Pontkoordináták frissítése ─────────────────────────────────────────
-    # pts_b: egyszerű eltolás (x-x1, y-y1)
-    # pts_a: H-val B-be transzformálva, majd ugyanaz az eltolás
-
-    pts_a_np = np.float32(pts_a).reshape(-1, 1, 2)
-    pts_a_in_b = cv2.perspectiveTransform(pts_a_np, H).reshape(-1, 2)
-
-    new_pts_a: List[Tuple[float, float]] = []
-    new_pts_b: List[Tuple[float, float]] = []
-
-    crop_w, crop_h = x2 - x1, y2 - y1
-    for (ax, ay), (bx, by) in zip(pts_a_in_b, pts_b):
-        nax, nay = ax - x1, ay - y1
-        nbx, nby = bx - x1, by - y1
-        # Csak azok a párok maradnak, amelyek mindkét oldalon a képen belül esnek
-        if (0 <= nax < crop_w and 0 <= nay < crop_h and
-                0 <= nbx < crop_w and 0 <= nby < crop_h):
-            new_pts_a.append((float(nax), float(nay)))
-            new_pts_b.append((float(nbx), float(nby)))
-
-    return img_a_out, img_b_out, new_pts_a, new_pts_b
 
 
 def _validate_anchor_points(pts_a, pts_b) -> tuple:
@@ -534,6 +445,41 @@ def warp_image_to_reference(src: np.ndarray, ref: np.ndarray,
                                flags=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_CONSTANT,
                                borderValue=(0, 0, 0))
+
+
+def crop_images_to_overlap(
+    warped_a: np.ndarray,
+    image_b:  np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """
+    Mindkét képet a valódi közös átfedési területre vágja.
+
+    A warpPerspective után a warped_a szélein fekete sávok keletkezhetnek
+    (ahol az A kép nem ért el), ezeket és az image_b megfelelő részeit
+    ez a függvény eltávolítja.
+
+    Visszatér: (cropped_a, cropped_b, x_offset, y_offset)
+      x_offset, y_offset: a kivágás bal-felső sarka az eredeti B-koordinátákban
+      (szükséges a GCP-inlier pontok eltolásához).
+    Ha nincs érdemi átfedés, az eredeti képeket adja vissza 0,0 offsettel.
+    """
+    # Nem-fekete maszk: legalább az egyik csatornán > 10 értékű pixel
+    def _nonblack(img: np.ndarray) -> np.ndarray:
+        return np.any(img > 10, axis=2) if img.ndim == 3 else img > 10
+
+    overlap = _nonblack(warped_a) & _nonblack(image_b)
+
+    rows = np.any(overlap, axis=1)
+    cols = np.any(overlap, axis=0)
+    if not rows.any() or not cols.any():
+        return warped_a, image_b, 0, 0
+
+    r0 = int(np.where(rows)[0][0])
+    r1 = int(np.where(rows)[0][-1]) + 1
+    c0 = int(np.where(cols)[0][0])
+    c1 = int(np.where(cols)[0][-1]) + 1
+
+    return warped_a[r0:r1, c0:c1], image_b[r0:r1, c0:c1], c0, r0
 
 
 def blend_same_size_images(a: np.ndarray, b: np.ndarray,
@@ -1493,12 +1439,49 @@ class AutomaticModeTab(QWidget):
 
         return params
 
+    def restore_params(self, d: Dict[str, Any]) -> None:
+        """Visszaállítja az automata illesztés összes beállítását a mentett dict-ből."""
+        backend = d.get("backend", "")
+        if backend:
+            idx = self.matcher_combo.findText(backend)
+            if idx >= 0:
+                self.matcher_combo.setCurrentIndex(idx)
+        if "use_ransac" in d:
+            self.ransac_chk.setChecked(bool(d["use_ransac"]))
+        if "reproj_threshold" in d:
+            self.ransac_reproj.setValue(float(d["reproj_threshold"]))
+        if "force_cpu" in d:
+            self.cpu_chk.setChecked(bool(d["force_cpu"]))
+        # Backend-specifikus widgetek (csak ha a megfelelő fül aktív)
+        idx = self.matcher_combo.currentIndex()
+        if idx == 0:   # SuperPoint + LightGlue
+            if "max_keypoints" in d:       self.sp_max_kp.setValue(int(d["max_keypoints"]))
+            if "match_threshold" in d:     self.sp_match_thresh.setValue(float(d["match_threshold"]))
+            if "detection_threshold" in d: self.sp_det_thresh.setValue(float(d["detection_threshold"]))
+            if "nms_radius" in d:          self.sp_nms_radius.setValue(int(d["nms_radius"]))
+            if "depth_confidence" in d:    self.sp_depth_conf.setValue(float(d["depth_confidence"]))
+            if "width_confidence" in d:    self.sp_width_conf.setValue(float(d["width_confidence"]))
+        elif idx == 1:  # DISK + LightGlue
+            if "max_keypoints" in d:   self.dk_max_kp.setValue(int(d["max_keypoints"]))
+            if "match_threshold" in d: self.dk_match_thresh.setValue(float(d["match_threshold"]))
+        elif idx == 2:  # LoFTR
+            if "pretrained" in d:
+                pi = self.lf_pretrained.findText(str(d["pretrained"]))
+                if pi >= 0: self.lf_pretrained.setCurrentIndex(pi)
+            if "confidence_threshold" in d:
+                self.lf_conf_thresh.setValue(float(d["confidence_threshold"]))
+        elif idx == 3:  # SIFT
+            if "max_keypoints" in d:      self.si_max_kp.setValue(int(d["max_keypoints"]))
+            if "n_octave_layers" in d:    self.si_octave_layers.setValue(int(d["n_octave_layers"]))
+            if "contrast_threshold" in d: self.si_contrast.setValue(float(d["contrast_threshold"]))
+            if "edge_threshold" in d:     self.si_edge.setValue(float(d["edge_threshold"]))
+            if "sigma" in d:              self.si_sigma.setValue(float(d["sigma"]))
+            if "ratio_threshold" in d:    self.si_ratio.setValue(float(d["ratio_threshold"]))
+
 
 # ── AdvancedEditorTab  (a PointEditorWidget-et használja) ───────────────────
 
 class AdvancedEditorTab(QWidget):
-
-    crop_requested = pyqtSignal()   # főablak _crop_to_overlap()-jához
 
     def __init__(self, settings: AppSettings, project: ProjectState) -> None:
         super().__init__()
@@ -1509,33 +1492,6 @@ class AdvancedEditorTab(QWidget):
         root = QVBoxLayout(self)
         root.setSpacing(4)
         root.setContentsMargins(4, 4, 4, 4)
-
-        # ── Vágás eszközsáv (képek betöltése után azonnal elérhető) ──────
-        crop_bar = QHBoxLayout()
-        crop_bar.setSpacing(6)
-
-        self._btn_crop = QPushButton(tr("✂  Képvágás"))
-        self._btn_crop.setToolTip(tr(
-            "Interaktív képvágó megnyitása.\n"
-            "Rajzolj téglalapot mindkét képre, majd vágja\n"
-            "és egyforma méretre hozza őket.\n\n"
-            "Használd a pontkeresés ELŐTT, hogy mindkét kép\n"
-            "pontosan ugyanazt a területet mutassa."))
-        self._btn_crop.setStyleSheet(
-            "QPushButton{background:#1a4a6a; color:#7fcfff; font-weight:bold;"
-            "padding:4px 14px; border-radius:4px; border:1px solid #2a6a9a;}"
-            "QPushButton:hover{background:#205878; color:#aaddff;}"
-            "QPushButton:disabled{background:#1e2430; color:#446;}")
-        self._btn_crop.clicked.connect(self.crop_requested.emit)
-
-        crop_bar.addWidget(self._btn_crop)
-        crop_bar.addStretch()
-
-        lbl_tip = QLabel(tr("← Vágd le a képeket először, majd keress pontpárokat"))
-        lbl_tip.setStyleSheet("color:#446a7a; font-size:10px; font-style:italic;")
-        crop_bar.addWidget(lbl_tip)
-
-        root.addLayout(crop_bar)
 
         # ── Pontszerkesztő (külön modul) ──────────────────────────────────
         self.point_editor = PointEditorWidget(self.project)
@@ -1979,6 +1935,40 @@ class ExportTab(QWidget):
         self._btn_generate.setText("⚙  Képkockák generálása")
         self._lbl_stale.setText("")
 
+    # ── Export-beállítások mentés/visszaállítás ──────────────────────────────
+
+    def get_export_settings(self) -> Dict[str, Any]:
+        """Az összes export UI-beállítás dictionary-ként a projektfájlba."""
+        return {
+            "frame_count": self._spin_frames.value(),
+            "fps":         self._spin_fps.value(),
+            "easing":      self._combo_ease.currentText(),
+            "ping_pong":   self._chk_pingpong.isChecked(),
+            "method":      self._combo_method.currentText(),
+            "flow_quality":self._combo_flow_quality.currentText(),
+        }
+
+    def restore_export_settings(self, d: Dict[str, Any]) -> None:
+        """Visszaállítja az export beállításokat betöltött projektadatból."""
+        if "frame_count" in d:
+            self._spin_frames.setValue(int(d["frame_count"]))
+        if "fps" in d:
+            self._spin_fps.setValue(float(d["fps"]))
+        if "easing" in d:
+            idx = self._combo_ease.findText(d["easing"])
+            if idx >= 0:
+                self._combo_ease.setCurrentIndex(idx)
+        if "ping_pong" in d:
+            self._chk_pingpong.setChecked(bool(d["ping_pong"]))
+        if "method" in d:
+            idx = self._combo_method.findText(d["method"])
+            if idx >= 0:
+                self._combo_method.setCurrentIndex(idx)
+        if "flow_quality" in d:
+            idx = self._combo_flow_quality.findText(d["flow_quality"])
+            if idx >= 0:
+                self._combo_flow_quality.setCurrentIndex(idx)
+
     # ── Adatok fogadása a MainWindow-tól ─────────────────────────────────────
 
     def set_morph_data(
@@ -2220,8 +2210,9 @@ class MainWindow(QMainWindow):
         except:
             set_language("hu")
         
-        self.settings = AppSettings()
-        self.project  = ProjectState()
+        self.settings      = AppSettings()
+        self.project       = ProjectState()
+        self._project_path: Optional[Path] = None   # ismert projektfájl → auto-mentés
         self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
         self.resize(1280, 820)
         self.setAcceptDrops(True)
@@ -2252,16 +2243,20 @@ class MainWindow(QMainWindow):
             lambda p: self._load_image_from_path(p, "A"))
         self.editor_tab.point_editor.image_b_drop_requested.connect(
             lambda p: self._load_image_from_path(p, "B"))
-        self.editor_tab.crop_requested.connect(self._crop_to_overlap)
 
-        self.tabs.addTab(self.auto_tab,    tr("⚡  Automata illesztés"))
-        self.tabs.addTab(self.editor_tab,  tr("✏️  Pontszerkesztő"))
-        self.tabs.addTab(self.preview_tab, tr("🔍  Előnézet"))
-        self.tabs.addTab(self.export_tab,  tr("🎬  Export"))
+        # Tab-ok a munkafolyamat sorrendjében:
+        #   ③ Pont szerkesztő  →  ④ Automata illesztés  →  ⑤ Előnézet  →  ⑥ Export
+        self.tabs.addTab(self.editor_tab,  tr("③  ✏️  Pontszerkesztő"))
+        self.tabs.addTab(self.auto_tab,    tr("④  ⚡  Automata illesztés"))
+        self.tabs.addTab(self.preview_tab, tr("⑤  🔍  Előnézet"))
+        self.tabs.addTab(self.export_tab,  tr("⑥  🎬  Export"))
 
         if _HAS_CONFIG_EDITOR:
             self.settings_tab = ConfigEditorTab(self)
             self.tabs.addTab(self.settings_tab, tr("⚙  Beállítások"))
+
+        # Fülváltáskor automatikus mentés (csak ha van ismert projektfájl)
+        self.tabs.currentChanged.connect(self._autosave)
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
@@ -2382,18 +2377,32 @@ class MainWindow(QMainWindow):
         tb.setObjectName("main_toolbar")
         self.addToolBar(tb)
 
+        # ── Lépés-felirat segédfüggvény ─────────────────────────────────────
+        def _step_label(text: str) -> QLabel:
+            lbl = QLabel(f"  {text}  ")
+            lbl.setStyleSheet(
+                "color:#6a8aaa; font-size:10px; font-weight:bold;"
+                "padding:0 2px;"
+            )
+            return lbl
+
+        # ════════════════════════════════════════════════════════════════════
+        # 1. lépés – Képek betöltése
+        # ════════════════════════════════════════════════════════════════════
+        tb.addWidget(_step_label("① Betöltés"))
+
         act_a = QAction(tr("📂  Kép A"), self)
-        act_a.setToolTip(tr("Kép A betöltése (Ctrl+1)"))
+        act_a.setToolTip(tr("① Kép A betöltése (Ctrl+1)\nAz animáció kiindulóképe (pl. előtte állapot)"))
         act_a.triggered.connect(lambda: self.load_image("A"))
 
         act_b = QAction(tr("📂  Kép B"), self)
-        act_b.setToolTip(tr("Kép B betöltése (Ctrl+2)"))
+        act_b.setToolTip(tr("① Kép B betöltése (Ctrl+2)\nAz animáció célképe (pl. utána állapot)"))
         act_b.triggered.connect(lambda: self.load_image("B"))
 
-        act_both = QAction(tr("📂  Mindkét kép…"), self)
+        act_both = QAction(tr("📂  A + B együtt…"), self)
         act_both.setToolTip(
-            tr("Két képfájl egyszerre kijelölése\n"
-            "Az első lesz Kép A, a második Kép B"))
+            tr("① Két képfájl egyszerre kijelölése\n"
+               "Az első lesz Kép A, a második Kép B"))
         act_both.triggered.connect(self.load_images_both)
 
         tb.addAction(act_a)
@@ -2401,66 +2410,179 @@ class MainWindow(QMainWindow):
         tb.addAction(act_both)
         tb.addSeparator()
 
+        # ════════════════════════════════════════════════════════════════════
+        # 2. lépés – Geometriai igazítás
+        # ════════════════════════════════════════════════════════════════════
+        tb.addWidget(_step_label("② Igazítás"))
+
+        act_gcp = QAction(tr("📍  GCP igazítás"), self)
+        act_gcp.setToolTip(
+            tr("② GCP-alapú geometriai igazítás  ← AJÁNLOTT\n\n"
+               "Jelölj meg 4–15 valódi egyező pontot (sarkok,\n"
+               "épületelemek stb.) a két képen, majd a program\n"
+               "homográfiával warpálja az A képet a B perspektívájába.\n\n"
+               "Ezután az automata illesztés lényegesen pontosabb lesz."))
+        act_gcp.triggered.connect(self._open_gcp_alignment)
+        tb.addAction(act_gcp)
+
+        tb.addSeparator()
+
+        # ════════════════════════════════════════════════════════════════════
+        # 3–5. lépés – a Tab-okon látható (Automata / Szerkesztő / Előnézet / Export)
+        # ════════════════════════════════════════════════════════════════════
+        tb.addWidget(_step_label("③–⑥ lásd fülek →"))
+        tb.addSeparator()
+
+        # ════════════════════════════════════════════════════════════════════
+        # Projekt mentés / betöltés (bármikor elérhető)
+        # ════════════════════════════════════════════════════════════════════
         act_save = QAction("💾  Mentés", self)
-        act_save.setToolTip("Projekt mentése (Ctrl+S)")
+        act_save.setToolTip("Projekt mentése (Ctrl+S)\nMentés bármikor elvégezhető")
         act_save.triggered.connect(self.save_project)
 
-        act_open = QAction("📁  Projekt", self)
-        act_open.setToolTip("Projekt megnyitása (Ctrl+O)")
+        act_open = QAction("📁  Projekt megnyitása", self)
+        act_open.setToolTip("Projekt betöltése (Ctrl+O)\nKorábban mentett munkamenet")
         act_open.triggered.connect(self.load_project)
 
         tb.addAction(act_save)
         tb.addAction(act_open)
-        tb.addSeparator()
 
-        act_crop = QAction(tr("✂  Képvágás"), self)
-        act_crop.setToolTip(
-            tr("Interaktív képvágó megnyitása.\n"
-               "Rajzolj téglalapot mindkét képre,\n"
-               "majd vágja és méretegyezteti őket."))
-        act_crop.triggered.connect(self._crop_to_overlap)
-        tb.addAction(act_crop)
+    # ── GCP-alapú geometriai igazítás ──────────────────────────────────────
 
-    def _crop_to_overlap(self) -> None:
-        """Interaktív képvágó párbeszédablak megnyitása."""
+    def _open_gcp_alignment(self) -> None:
+        """
+        GCP (Ground Control Points) alapú igazítás.
+
+        Lépések:
+          1. GCPDialog – felhasználó megjelöl 4–15 párpontot
+          2. cv2.findHomography (RANSAC) → H mátrix
+          3. warpPerspective: A kép B perspektívájába transzformálva
+          4. Régi pontpárok törlése (koordináták érvénytelenek)
+          5. RANSAC-inlier GCP-k opcionálisan horgonypontként a morfszerkesztőbe
+          6. Overlay és preview frissítése
+        """
         if self.project.image_a is None or self.project.image_b is None:
-            QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
+            QMessageBox.warning(
+                self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
             return
 
-        if not _HAS_CROP_DIALOG:
-            QMessageBox.critical(self, tr("Hiba"),
-                                 "crop_dialog.py nem található.")
+        if cv2 is None:
+            QMessageBox.critical(
+                self, tr("Hiba"),
+                "Az OpenCV (cv2) nincs telepítve – szükséges a homográfia számításhoz.")
             return
 
-        dlg = CropDialog(self.project.image_a, self.project.image_b, self)
+        if not _HAS_GCP_DIALOG:
+            QMessageBox.critical(
+                self, tr("Hiba"), "gcp_dialog.py nem található.")
+            return
+
+        dlg = GCPDialog(self.project.image_a, self.project.image_b, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        img_a_out, img_b_out = dlg.get_results()
-        if img_a_out is None or img_b_out is None:
+        pairs = dlg.get_pairs()
+        if len(pairs) < 4:
             return
 
-        # Undo mentése a vágás előtti állapotról
+        # ── Numpy tömbök ────────────────────────────────────────────────────
+        pts_a = np.array([[p[0], p[1]] for p, _ in pairs], dtype=np.float32)
+        pts_b = np.array([[p[0], p[1]] for _, p in pairs], dtype=np.float32)
+
+        # ── Homográfia RANSAC-kal ────────────────────────────────────────────
+        H, mask = cv2.findHomography(pts_a, pts_b, cv2.RANSAC, 5.0)
+        if H is None:
+            QMessageBox.warning(
+                self, tr("Hiba"),
+                "A homográfia számítás nem sikerült.\n"
+                "Próbálj több / jobban elosztott pontpárt megjelölni,\n"
+                "vagy ellenőrizd, hogy valóban megfelelő pontokat jelöltél.")
+            return
+
+        n_inliers = int(mask.sum()) if mask is not None else len(pairs)
+
+        # ── A kép warpálása B perspektívájába ────────────────────────────────
+        h_b, w_b = self.project.image_b.shape[:2]
+        warped_a = cv2.warpPerspective(
+            self.project.image_a, H, (w_b, h_b),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+
+        # ── Vágás az átfedési területre ──────────────────────────────────────
+        # A warp után warped_a szélein fekete sávok keletkezhetnek;
+        # mindkét képet a tényleges átfedési területre vágjuk.
+        warped_a, image_b_cropped, crop_x, crop_y = crop_images_to_overlap(
+            warped_a, self.project.image_b)
+
+        # ── Undo-buffer mentés ───────────────────────────────────────────────
         self.editor_tab.point_editor._push_undo()
 
-        # Képek cseréje
-        self.project.image_a = img_a_out
-        self.project.image_b = img_b_out
+        # ── Projekt frissítése ───────────────────────────────────────────────
+        self.project.image_a             = warped_a
+        self.project.image_a_is_modified = True   # orig. path != memória → mentéskor PNG-be ír
+        self.project.image_b             = image_b_cropped
+        self.project.image_b_is_modified = True
+        self.project.homography_matrix   = H.tolist()
 
-        # Pontpárok törlése – a vágás után a koordináták már nem érvényesek
-        self.project.anchor_points_a = []
-        self.project.anchor_points_b = []
-        self.project.raw_matches_a   = []
-        self.project.raw_matches_b   = []
-        self.project.raw_inlier_mask = []
+        # Régi pontpárok törlése (koordináták a warp után érvénytelenek)
+        self.project.anchor_points_a  = []
+        self.project.anchor_points_b  = []
+        self.project.raw_matches_a    = []
+        self.project.raw_matches_b    = []
+        self.project.raw_inlier_mask  = []
 
-        # UI frissítése
+        # ── GCP-k horgonypontként a morfszerkesztőbe (opcionális) ────────────
+        # Warp + vágás után az inlier-pontok B-koordinátájából le kell vonni
+        # a crop offsetet, hogy a vágott képre mutassanak.
+        if mask is not None:
+            inlier_b = [
+                [pts_b[i][0] - crop_x, pts_b[i][1] - crop_y]
+                for i in range(len(pairs))
+                if mask[i, 0]
+            ]
+        else:
+            inlier_b = [[pb[0] - crop_x, pb[1] - crop_y] for _, pb in pairs]
+
+        if inlier_b:
+            reply = QMessageBox.question(
+                self,
+                tr("GCP-k a morfszerkesztőbe"),
+                (
+                    f"{n_inliers} RANSAC-inlier GCP pár.\n\n"
+                    "Hozzáadjam ezeket horgonypontokként a morfpontszerkesztőhöz?\n"
+                    "(Mindkét oldalon azonos pozíción lesznek → stabilizáló hatás.)"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                for pb in inlier_b:
+                    self.project.anchor_points_a.append(pb)
+                    self.project.anchor_points_b.append(pb)
+
+        # ── Overlay és preview ───────────────────────────────────────────────
+        try:
+            overlay = blend_same_size_images(warped_a, image_b_cropped, alpha=0.5)
+        except Exception:
+            overlay = warped_a.copy()
+
+        self.project.aligned_image_a_to_b    = warped_a
+        self.project.aligned_overlay_preview = overlay
+        self.preview_tab.set_alignment_images(
+            image_b_cropped, warped_a, overlay)
+
+        # ── UI frissítése ────────────────────────────────────────────────────
         self.editor_tab.load_images()
         self.editor_tab.refresh_views()
 
-        h, w = img_a_out.shape[:2]
+        h_crop, w_crop = warped_a.shape[:2]
         self.statusBar().showMessage(
-            tr("✂  Vágás kész  –  ") + f"{w}×{h} px")
+            f"📍 GCP igazítás kész  –  {len(pairs)} pár, {n_inliers} inlier  |  "
+            f"Átfedési terület: {w_crop}×{h_crop} px  "
+            f"(vágva {w_b-w_crop}×{h_b-h_crop} px-t)"
+        )
 
     def _apply_dark_theme(self) -> None:
         self.setStyleSheet("""
@@ -2676,14 +2798,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("Hiba a kép betöltésekor"), str(exc))
             return
         if slot == "A":
-            self.project.image_a      = img
-            self.project.image_a_path = Path(path)
+            self.project.image_a             = img
+            self.project.image_a_path        = Path(path)
+            self.project.image_a_is_modified = False  # lemezről töltöttük, nem módosított
         else:
-            self.project.image_b      = img
-            self.project.image_b_path = Path(path)
+            self.project.image_b             = img
+            self.project.image_b_path        = Path(path)
+            self.project.image_b_is_modified = False
         self.editor_tab.load_images()
         self._update_title()
-        self.tabs.setCurrentIndex(1)
+        # Ha mindkét kép betöltve → ugrás a pontszerkesztőre
+        if self.project.image_a is not None and self.project.image_b is not None:
+            self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(
             tr("Kép ") + f"{slot} " + tr("betöltve: ") + f"{Path(path).name}  "
             f"({img.shape[1]}×{img.shape[0]} px)"
@@ -2773,7 +2899,7 @@ class MainWindow(QMainWindow):
                 )
 
             self.editor_tab.refresh_views()
-            self.tabs.setCurrentIndex(1)
+            self.tabs.setCurrentIndex(0)   # Pontszerkesztő – azonnal látszanak az új pontok
             n = len(self.project.anchor_points_a)
             self.statusBar().showMessage(
                 tr("Illesztés kész  –  ") + f"{n} " + tr("pontpár  |  eszköz: ") + f"{device}")
@@ -2919,24 +3045,84 @@ class MainWindow(QMainWindow):
 
     # ── Projekt mentése / betöltése ──────────────────────────────────────────
 
-    def save_project(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, tr("Projekt mentése"), "", tr("ArchMorph projekt (*.json)"))
-        if not path:
-            return
-        data = {
-            "app_version": APP_VERSION,
-            "image_a":     str(self.project.image_a_path) if self.project.image_a_path else None,
-            "image_b":     str(self.project.image_b_path) if self.project.image_b_path else None,
-            "points_a":    self.project.anchor_points_a,
-            "points_b":    self.project.anchor_points_b,
-            "homography":  self.project.homography_matrix,
-        }
+    def _save_project_to(self, path: Path) -> bool:
+        """
+        Projekt mentése a megadott útvonalra, fájlválasztó dialóg nélkül.
+        Ha a memóriában lévő kép eltér az eredeti fájltól (GCP warp / crop),
+        a módosított képet PNG-ként menti a JSON mellé.
+        Visszatér: True ha sikeres, False ha hiba.
+        """
         try:
-            ensure_utf8_json_dump(data, Path(path))
-            self.statusBar().showMessage(f"Projekt mentve: {Path(path).name}")
+            json_stem = path.stem
+            json_dir  = path.parent
+
+            img_a_path_str = str(self.project.image_a_path) if self.project.image_a_path else None
+            img_b_path_str = str(self.project.image_b_path) if self.project.image_b_path else None
+
+            if self.project.image_a_is_modified and self.project.image_a is not None and cv2 is not None:
+                mod_path = json_dir / f"{json_stem}_image_a.png"
+                cv2.imwrite(str(mod_path), self.project.image_a)
+                img_a_path_str                   = str(mod_path)
+                self.project.image_a_path        = mod_path
+                self.project.image_a_is_modified = False
+
+            if self.project.image_b_is_modified and self.project.image_b is not None and cv2 is not None:
+                mod_path = json_dir / f"{json_stem}_image_b.png"
+                cv2.imwrite(str(mod_path), self.project.image_b)
+                img_b_path_str                   = str(mod_path)
+                self.project.image_b_path        = mod_path
+                self.project.image_b_is_modified = False
+
+            data = {
+                # ── Verzió ──────────────────────────────────────────────────
+                "app_version":   APP_VERSION,
+
+                # ── Képek ───────────────────────────────────────────────────
+                "image_a":       img_a_path_str,
+                "image_b":       img_b_path_str,
+
+                # ── Manuális morfpontok ──────────────────────────────────────
+                "points_a":      self.project.anchor_points_a,
+                "points_b":      self.project.anchor_points_b,
+
+                # ── Homográfia (GCP / auto-illesztésből) ─────────────────────
+                "homography":    self.project.homography_matrix,
+
+                # ── Automata illesztés nyers eredményei ──────────────────────
+                "raw_matches_a":   self.project.raw_matches_a,
+                "raw_matches_b":   self.project.raw_matches_b,
+                "raw_inlier_mask": self.project.raw_inlier_mask,
+
+                # ── Automata illesztés: összes UI-beállítás ──────────────────
+                "auto_params":   self.auto_tab.get_match_params(),
+
+                # ── Export fül beállításai ───────────────────────────────────
+                "export":        self.export_tab.get_export_settings(),
+            }
+            ensure_utf8_json_dump(data, path)
+            return True
         except Exception as exc:
-            QMessageBox.critical(self, "Mentési hiba", str(exc))
+            QMessageBox.critical(self, tr("Mentési hiba"), str(exc))
+            return False
+
+    def save_project(self) -> None:
+        """Projekt mentése fájlválasztó dialóggal."""
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, tr("Projekt mentése"), "", tr("ArchMorph projekt (*.json)"))
+        if not path_str:
+            return
+        path = Path(path_str)
+        if self._save_project_to(path):
+            self._project_path = path
+            self.statusBar().showMessage(tr("Projekt mentve: ") + path.name)
+
+    def _autosave(self) -> None:
+        """Néma automatikus mentés fülváltáskor, ha van ismert projektfájl."""
+        if self._project_path is None:
+            return
+        if self._save_project_to(self._project_path):
+            self.statusBar().showMessage(
+                tr("Auto-mentve: ") + self._project_path.name)
 
     def _load_project_from_path(self, path: str) -> None:
         """Belső segédmetódus: projektfájl betöltése a megadott elérési útról."""
@@ -2955,21 +3141,57 @@ class MainWindow(QMainWindow):
             
             self.project.homography_matrix = data.get("homography")
 
+            # ── Automata illesztés nyers eredményei ──────────────────────────
+            raw_a = data.get("raw_matches_a", [])
+            raw_b = data.get("raw_matches_b", [])
+            mask  = data.get("raw_inlier_mask", [])
+            self.project.raw_matches_a   = [list(p) for p in raw_a]
+            self.project.raw_matches_b   = [list(p) for p in raw_b]
+            self.project.raw_inlier_mask = list(mask)
+
+            # ── Export beállítások visszaállítása ────────────────────────────
+            export_d = data.get("export", {})
+            if export_d:
+                self.export_tab.restore_export_settings(export_d)
+
+            # ── Automata illesztés összes beállítása ──────────────────────────
+            # Régi formátum: "matcher_backend" (csak backend string)
+            # Új formátum:   "auto_params" (teljes params dict)
+            auto_p = data.get("auto_params")
+            if auto_p:
+                try:
+                    self.auto_tab.restore_params(auto_p)
+                except Exception:
+                    pass
+            else:
+                # Visszafelé kompatibilitás régi projektfájlokkal
+                backend = data.get("matcher_backend", "")
+                if backend:
+                    try:
+                        idx = self.auto_tab.matcher_combo.findText(backend)
+                        if idx >= 0:
+                            self.auto_tab.matcher_combo.setCurrentIndex(idx)
+                    except Exception:
+                        pass
+
             for slot, key in [("A", "image_a"), ("B", "image_b")]:
                 img_path = data.get(key)
                 if img_path and Path(img_path).exists():
                     img = cv_imread_unicode_safe(Path(img_path))
                     if slot == "A":
-                        self.project.image_a      = img
-                        self.project.image_a_path = Path(img_path)
+                        self.project.image_a             = img
+                        self.project.image_a_path        = Path(img_path)
+                        self.project.image_a_is_modified = False
                     else:
-                        self.project.image_b      = img
-                        self.project.image_b_path = Path(img_path)
+                        self.project.image_b             = img
+                        self.project.image_b_path        = Path(img_path)
+                        self.project.image_b_is_modified = False
 
+            self._project_path = Path(path)   # auto-mentés engedélyezése ettől fogva
             self.editor_tab.load_images()
             self.editor_tab.refresh_views()
             self._update_title()
-            self.tabs.setCurrentIndex(1)
+            self.tabs.setCurrentIndex(0)   # Pontszerkesztő
             self.statusBar().showMessage(
                 tr("Projekt betöltve: ") + f"{Path(path).name}  "
                 f"({len(self.project.anchor_points_a)} " + tr("pontpár)"))

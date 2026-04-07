@@ -133,3 +133,70 @@ def reload() -> None:
     _loaded = False
     _data.clear()
     _ensure_loaded()
+
+
+def save_config(key_path: str, value: Any) -> None:
+    """
+    Egy kulcsot ír/frissít a TOML fájlban.
+
+    Csak egyszerű dot-notációjú kulcsokat kezel (pl. "ui.language").
+    Ha a fájl nem létezik vagy nem írható, csendesen kihagyja.
+    """
+    _ensure_loaded()
+
+    # Frissítjük a memóriabeli dict-et
+    parts = key_path.split(".")
+    node: Any = _data
+    for part in parts[:-1]:
+        if part not in node or not isinstance(node[part], dict):
+            node[part] = {}
+        node = node[part]
+    node[parts[-1]] = value
+
+    # Visszaírás TOML-ba (csak ha a fájl már létezik)
+    if not _CONFIG_FILE.exists():
+        return
+    try:
+        # Egyszerű sor-alapú frissítés: ha a sor tartalmazza a kulcsot,
+        # lecseréljük; különben a fájl végéhez fűzzük.
+        key_leaf = parts[-1]
+        section  = ".".join(parts[:-1])
+
+        lines = _CONFIG_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
+        in_section = (section == "")
+        target_header = f"[{section}]" if section else None
+        replaced = False
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if target_header and stripped == target_header:
+                in_section = True
+                continue
+            if in_section and stripped.startswith("[") and stripped != target_header:
+                in_section = False
+            if in_section and stripped.startswith(f"{key_leaf}"):
+                val_str = _toml_value(value)
+                lines[i] = f"{key_leaf} = {val_str}\n"
+                replaced = True
+                break
+
+        if not replaced:
+            val_str = _toml_value(value)
+            if target_header:
+                lines.append(f"\n[{section}]\n{key_leaf} = {val_str}\n")
+            else:
+                lines.append(f"{key_leaf} = {val_str}\n")
+
+        _CONFIG_FILE.write_text("".join(lines), encoding="utf-8")
+    except Exception:
+        pass  # Írási hiba: csendesen kihagyja
+
+
+def _toml_value(v: Any) -> str:
+    """Egyszerű Python → TOML érték konverzió."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return str(v)
