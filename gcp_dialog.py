@@ -31,7 +31,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QSpinBox, QVBoxLayout, QWidget,
@@ -68,10 +68,15 @@ class GCPCanvas(PointEditorCanvas):
     """
 
     point_clicked = pyqtSignal(float, float)
+    # Stub: a régi PointEditorCanvas-ban létező görbe-jel emulációja.
+    # Az új tervben a GCP dialog csak pont-módban működik; a vonallánc/ív
+    # gombok megtartva a UI-ban, de nem csinálnak semmit.
+    curve_done    = pyqtSignal(list)
 
     def __init__(self, side: str) -> None:
         super().__init__(side)          # title = "A" / "B"
-        self._active  = False
+        self._active     = False
+        self._draw_mode  = "point"      # "point" | "polyline" | "arc"  (jelenleg csak "point" aktív)
         self._pending: Optional[Tuple[float, float]] = None
 
     # ── Publikus API ─────────────────────────────────────────────────────────
@@ -85,6 +90,14 @@ class GCPCanvas(PointEditorCanvas):
         """Félkész A-pont megjelenítés (szaggatott kör); None = nincs."""
         self._pending = pt
         self.update()
+
+    def set_draw_mode(self, mode: str) -> None:
+        """Rajzolási mód beállítása (stub – jelenleg csak 'point' aktív)."""
+        self._draw_mode = mode
+
+    def cancel_curve(self) -> None:
+        """Félkész görbe törlése (stub – görbe-funkció nem aktív)."""
+        pass
 
     # ── Esemény-felülírások ──────────────────────────────────────────────────
 
@@ -118,36 +131,74 @@ class GCPCanvas(PointEditorCanvas):
             return
         super().mouseDoubleClickEvent(event)
 
-    # ── GCP-specifikus rajzolás (a szülő paintEvent UTÁN) ────────────────────
+    # ── GCP-specifikus rajzolás – hook a szülő painter-ébe ───────────────────
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        super().paintEvent(event)          # Kép + pontok + görbe overlay
+    def _paint_overlay(self, p: "QPainter") -> None:  # type: ignore[override]
+        """
+        A PointEditorCanvas.paintEvent() az összes alap-rajzolás után
+        egy aktív painter-rel hívja meg ezt a metódust.
+        Így egyetlen QPainter van aktív egyszerre – elkerüljük a
+        "device already being painted" Qt-összeomlást.
+        """
+        p.setRenderHint(p.RenderHint.Antialiasing)
 
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # ── GCP pontok kontrasztos újrarajzolása ─────────────────────────────
+        # A szülő már rajzolt narancsos köröket, de világos háttér esetén
+        # nem látszanak. Felülrajzoljuk: fekete kontúr + élénk szín belül.
+        for i, pt in enumerate(self._points):
+            wpt = self._i2w(*pt)
+            if wpt is None:
+                continue
+            px, py = int(wpt[0]), int(wpt[1])
+            r = 8
 
-        # Aktív keret (ciánkék)
+            # Fekete körvonal (kontraszt réteg)
+            p.setPen(QPen(QColor(0, 0, 0, 220), 3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(px - r, py - r, r * 2, r * 2)
+
+            # Élénk belső töltés (narancssárga)
+            p.setPen(QPen(QColor("#ff8a3d"), 2))
+            p.setBrush(QBrush(QColor(255, 138, 61, 160)))
+            p.drawEllipse(px - r + 1, py - r + 1, (r - 1) * 2, (r - 1) * 2)
+
+            # Sorszám fehér, fekete árnyékkal
+            font = QFont("Arial", 8, QFont.Weight.Bold)
+            p.setFont(font)
+            tx, ty = px + r + 2, py + 4
+            # árnyék
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1))
+            p.drawText(tx + 1, ty + 1, str(i + 1))
+            # szöveg
+            p.setPen(QPen(QColor("#ffffff"), 1))
+            p.drawText(tx, ty, str(i + 1))
+
+        # ── Aktív keret (ciánkék) ────────────────────────────────────────────
         if self._active:
             p.setPen(QPen(QColor("#22ddcc"), 3))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(2, 2, self.width() - 4, self.height() - 4)
 
-        # Pending pont (szaggatott fehér kör – párjára vár)
+        # ── Pending pont (párjára vár) ───────────────────────────────────────
         if self._pending is not None:
             wpt = self._i2w(*self._pending)
             if wpt is not None:
-                px, py = wpt
-                p.setPen(QPen(QColor("white"), 1.5, Qt.PenStyle.DashLine))
-                p.setBrush(QColor(255, 255, 255, 60))
-                p.drawEllipse(int(px) - 10, int(py) - 10, 20, 20)
+                px, py = int(wpt[0]), int(wpt[1])
+                # Fekete körvonal
+                p.setPen(QPen(QColor(0, 0, 0, 180), 3))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(px - 12, py - 12, 24, 24)
+                # Szaggatott sárga
+                p.setPen(QPen(QColor("#ffe060"), 2, Qt.PenStyle.DashLine))
+                p.setBrush(QBrush(QColor(255, 224, 96, 50)))
+                p.drawEllipse(px - 11, py - 11, 22, 22)
 
-        # Oldal-cimke (A / B) – bal felső sarok
-        p.fillRect(8, 8, 34, 26, QColor(0, 0, 0, 180))
+        # ── Oldal-cimke (A / B) – bal felső sarok ───────────────────────────
+        p.fillRect(8, 8, 34, 26, QColor(0, 0, 0, 200))
         p.setPen(QPen(QColor("#ffffff"), 1))
         font = QFont("Arial", 13, QFont.Weight.Bold)
         p.setFont(font)
         p.drawText(12, 28, self.title)
-        p.end()
 
 
 # ────────────────────────────────────────────────────────────────────────────

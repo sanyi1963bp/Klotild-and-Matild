@@ -1,0 +1,27 @@
+# Lefordított Python fájlok
+__pycache__/
+*.pyc
+*.pyo
+
+# Kimeneti animációk
+*.mp4
+
+# Teszt képek / ideiglenes projekt fájlok
+*.png
+*.jpg
+*.jpeg
+
+# Személyes projekt-mentések és téma-beállítások
+1.json
+2.json
+3.json
+archmorph_themes.json
+
+# Dokumentáció (külön kezeljük)
+*.docx
+
+# Profilok
+profiles/
+
+# Backup batch szkript
+github_feltoltes.bat

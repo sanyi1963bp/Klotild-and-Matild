@@ -3,31 +3,31 @@ point_editor.py  –  Pontszerkesztő modul (ArchMorph Professional)
 ==================================================================
 Önálló PyQt6 modul; csak numpy és opcionálisan cv2 kell hozzá.
 
-Funkciók
---------
-- Dupla bal klikk üres helyen → pontpár hozzáadása (A+B egyszerre, arányos tükrözéssel)
-- Bal klikk + húzás ponton   → pont mozgatása
-- Bal klikk + húzás képen   → gumiszalag-kijelölés (keret); érintett pontok kiemelve
-- Ctrl + húzás képen         → ROI-kijelölés (helyi illesztéshez); sárga keret
-- Jobb klikk ponton          → helyi menü (kiválasztás / törlés párjával)
-- Ctrl+Görgetés              → pontindex léptetés (fel/le)
-- Görgetés                   → zoom az aktív pont körül
-- Delete                     → kijelölt pontpár(ok) törlése
-- Ctrl+Z                     → visszavonás (legutóbbi add/delete)
-- Nyílbillentyűk             → aktív pont pixelpontos mozgatása (Shift = 10 px)
-- Space                      → zoom szinkron a másik canvasra
-- Ctrl+0                     → zoom visszaállítás
+Interakció
+----------
+Egyszeres klikk         → pontpár lerakása (3-pont affin interpoláció a párhoz)
+Dupla klikk             → vonallánc rajzolás kezdete / vége
+  (közben egyszeres klikk → csúcs hozzáadása; párja azonnal megjelenik)
+  Vonallánc lezárása után → felosztás 30 px-enként, interpolált párpontok
+Bal húzás ponton        → pont mozgatása
+Bal húzás képen         → gumiszalag-kijelölés (kék keret)
+Ctrl+bal húzás          → tartós téglalap-ROI
+Ctrl+bal klikk ponton  → multi-kijelölés toggle
+Jobb klikk képen        → pásztázás; klikk (mozgás nélkül) → pont törlés
+Középső gomb            → zoom visszaállítás + utolsó undo
+Ctrl+görgetés           → pontindex léptetés
+Görgetés                → zoom
+Delete                  → kijelölt pontpár(ok) törlése
+Ctrl+Z                  → visszavonás
+Nyílbillentyűk          → aktív pont mozgatása 1 px (Shift = 10 px)
+Space                   → zoom szinkron a másik canvasra
+Ctrl+0                  → zoom visszaállítás
+Esc                     → vonallánc rajzolás megszakítása
 
 Exportált osztályok
 -------------------
     PointEditorCanvas   – egy képet megjelenítő szerkeszthető canvas
     PointEditorWidget   – kétpaneles szerkesztő (A + B kép, párkezelés)
-
-Megjegyzés a layoutról
-----------------------
-A canvas QWidget-ből örökli magát (NEM QLabel-ből), és paintEvent()-et
-használ a rajzoláshoz. Ez megakadályozza a QLabel.setPixmap() által
-okozott végtelen layout-növekedést (pixmap → sizeHint loop).
 """
 from __future__ import annotations
 
@@ -36,13 +36,13 @@ from typing import List, Optional, Set, Tuple
 
 import numpy as np
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, QPoint, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction, QActionGroup, QBrush, QColor, QFont,
     QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
 )
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
+    QHBoxLayout, QLabel, QMenu, QPushButton, QMessageBox,
     QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -52,21 +52,18 @@ except ImportError:
     def tr(text: str) -> str: return text
 
 # ── Konfiguráció betöltése ────────────────────────────────────────────────────
-# Az archmorph_config.toml fájlból olvassa az értékeket (ha létezik).
-# Ha nem létezik, vagy hibás, az alábbi alapértelmezett értékek maradnak.
 try:
     from archmorph_config_loader import cfg, cfg_rgba
 except ImportError:
-    # Ha a config_loader nincs meg, semleges fallback
     def cfg(key, default):      return default        # type: ignore[misc]
     def cfg_rgba(key, default): return default        # type: ignore[misc]
 
-# ── Vizuális konstansok (archmorph_config.toml → [ui.sizes] és [ui.colors]) ──
+# ── Vizuális konstansok ───────────────────────────────────────────────────────
 
-_R_NORMAL = cfg("ui.sizes.point_radius_normal", 6)    # Normál pont sugara (px)
-_R_ACTIVE = cfg("ui.sizes.point_radius_active", 10)   # Aktív pont sugara (px)
-_R_MULTI  = cfg("ui.sizes.point_radius_multi",  8)    # Multi-kijelölt pont sugara (px)
-_HIT_R    = cfg("ui.sizes.point_hit_radius",    14)   # Kattintási érzékenység (px)
+_R_NORMAL = cfg("ui.sizes.point_radius_normal", 6)
+_R_ACTIVE = cfg("ui.sizes.point_radius_active", 10)
+_R_MULTI  = cfg("ui.sizes.point_radius_multi",  8)
+_HIT_R    = cfg("ui.sizes.point_hit_radius",    14)
 
 _C_NORMAL = QColor(cfg("ui.colors.points.normal",      "#ff8a3d"))
 _C_ACTIVE = QColor(cfg("ui.colors.points.active",      "#ff3333"))
@@ -77,30 +74,32 @@ _C_BG     = QColor(cfg("ui.colors.canvas.background",  "#1a1f24"))
 _C_BORDER = QColor(cfg("ui.colors.canvas.border",      "#343b45"))
 _C_PLACEHOLDER = QColor(cfg("ui.colors.canvas.placeholder", "#4a5260"))
 
-# Pontok belső kitöltése (RGBA)
 _C_FILL_N = QColor(*cfg_rgba("ui.colors.points.fill.normal_rgba", (255, 138,  61,  70)))
 _C_FILL_A = QColor(*cfg_rgba("ui.colors.points.fill.active_rgba", (255,  51,  51, 150)))
 _C_FILL_M = QColor(*cfg_rgba("ui.colors.points.fill.multi_rgba",  ( 68, 170, 255,  90)))
 
-# Gumiszalag stílus
 _C_RBAND_SEL = QColor(cfg("ui.colors.rband.selection", "#88bbff"))
 _C_RBAND_ROI = QColor(cfg("ui.colors.rband.roi",       "#ffcc44"))
 
-# Sokszög-ROI stílus
 _C_POLY_DRAW = QColor(cfg("ui.colors.polygon.draw", "#FFB300"))
 _C_POLY_DONE = QColor(cfg("ui.colors.polygon.done", "#FF6F00"))
 _C_POLY_FILL = QColor(*cfg_rgba("ui.colors.polygon.fill_rgba", (255, 179, 0, 35)))
 
-# Tartós téglalap-ROI stílus
 _C_ROI_BORDER  = QColor(cfg("ui.colors.roi.border", "#ff9900"))
 _C_ROI_HANDLE  = QColor(cfg("ui.colors.roi.handle", "#ffffff"))
 _C_ROI_FILL    = QColor(*cfg_rgba("ui.colors.roi.fill_rgba",    (255, 153,   0,  22)))
 _C_ROI_OUTSIDE = QColor(*cfg_rgba("ui.colors.roi.outside_rgba", (  0,   0,   0,  90)))
-_ROI_HANDLE_R  = cfg("ui.sizes.roi_handle_radius", 6)    # fogópontok sugara (px)
-_ROI_MIN_SIZE  = cfg("ui.sizes.roi_min_size",       10)   # minimum ROI méret (px)
+_ROI_HANDLE_R  = cfg("ui.sizes.roi_handle_radius", 6)
+_ROI_MIN_SIZE  = cfg("ui.sizes.roi_min_size",       10)
+
+# Vonallánc szín
+_C_POLYLINE = QColor("#22ddcc")
+
+# Klikk-disambiguáció időzítője (ms) – egyszeres vs. dupla klikk megkülönböztetése
+_CLICK_DISAMBIG_MS = 250
 
 
-# ── Segédfüggvény (cv2 nélkül is működik) ───────────────────────────────────
+# ── Segédfüggvény ─────────────────────────────────────────────────────────────
 def _bgr_to_qpixmap(image_bgr: np.ndarray) -> QPixmap:
     try:
         import cv2
@@ -119,53 +118,57 @@ class PointEditorCanvas(QWidget):
     """
     Egy képet megjelenítő canvas teljes pontszerkesztési funkcióval.
 
-    QWidget + paintEvent() alapú — NEM QLabel — ezért a layout mérete
-    mindig rögzített és nem igazodik a betöltött kép pixelméretéhez.
-
     Jelek
     -----
-    point_added(x, y)               Új pont kérése (képkoordinátában)
-    point_moved(idx, x, y)          Pont pozíciója megváltozott
-    point_deleted(idx)              Pont törlése kérve (egyszeres)
-    points_delete_multi_requested() Multi-kijelölt pontok törlése kérve
-    point_selected(idx)             Pont kiválasztva (-1 = deselect)
-    selection_changed(list[int])    Gumiszalag kijelölés végeredménye
-    roi_search_requested(x1,y1,x2,y2)  Ctrl-bekeretezés (képkoord, ROI search)
-    zoom_sync_requested(zoom, rx, ry)   Space: zoom-szinkron kérés
-    middle_clicked()                Középső gomb: zoom reset + undo
-    undo_requested()                Ctrl+Z: visszavonás
+    single_click_confirmed(x, y)     250 ms utáni egyszeres klikk (képkoord)
+    double_click_confirmed(x, y)     dupla klikk (képkoord)
+    escape_pressed()                 Esc lenyomva
+    point_moved(idx, x, y)           pont pozíciója megváltozott
+    point_deleted(idx)               pont törlése kérve
+    points_delete_multi_requested()  multi-kijelölt pontok törlése kérve
+    point_selected(idx)              pont kiválasztva (-1 = deselect)
+    selection_changed(list[int])     gumiszalag kijelölés végeredménye
+    roi_ready(list)                  sokszög-ROI kész
+    roi_rect_changed(QRectF|None)    tartós téglalap-ROI változott
+    zoom_sync_requested(z, rx, ry)   Space: zoom-szinkron kérés
+    middle_clicked()                 középső gomb
+    undo_requested()                 Ctrl+Z
+    image_drop_requested(str)        kép drag & drop
     """
 
-    point_added                 = pyqtSignal(float, float)
-    point_moved                 = pyqtSignal(int, float, float)
-    curve_done                  = pyqtSignal(list)   # [(x,y)…] képkoordban
-    point_deleted               = pyqtSignal(int)
+    single_click_confirmed       = pyqtSignal(float, float)
+    double_click_confirmed       = pyqtSignal(float, float)
+    escape_pressed               = pyqtSignal()
+    point_moved                  = pyqtSignal(int, float, float)
+    point_deleted                = pyqtSignal(int)
     points_delete_multi_requested = pyqtSignal()
-    point_selected              = pyqtSignal(int)
-    selection_changed           = pyqtSignal(list)
-    roi_ready                   = pyqtSignal(list)   # sokszög widget-koordinátákban
-    roi_rect_changed            = pyqtSignal(object) # QRectF képkoordban vagy None
-    zoom_sync_requested         = pyqtSignal(float, float, float)
-    middle_clicked              = pyqtSignal()
-    undo_requested              = pyqtSignal()
-    image_drop_requested        = pyqtSignal(str)    # kép drag & drop
+    point_selected               = pyqtSignal(int)
+    selection_changed            = pyqtSignal(list)
+    roi_ready                    = pyqtSignal(list)
+    roi_rect_changed             = pyqtSignal(object)
+    zoom_sync_requested          = pyqtSignal(float, float, float)
+    middle_clicked               = pyqtSignal()
+    undo_requested               = pyqtSignal()
+    image_drop_requested         = pyqtSignal(str)
+    polyline_vertex_moved        = pyqtSignal(int, int, float, float)  # pidx, vidx, x, y
+    polyline_delete_requested    = pyqtSignal(int)                      # pidx
+    polyline_vertex_delete_requested = pyqtSignal(int, int)             # pidx, vidx
 
     _IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
-
     _ZOOM_MIN  = 0.5
     _ZOOM_MAX  = 20.0
-    _ZOOM_STEP = 1.18    # egy kerékgörgés szorzója
-    _RBAND_MIN = 4       # minimális mozgás px-ben a gumiszalag aktiválásához
+    _ZOOM_STEP = 1.18
+    _RBAND_MIN = 4
 
     def __init__(self, title: str) -> None:
         super().__init__()
         self.title = title
 
         self._pixmap_orig: Optional[QPixmap]           = None
-        self._img_size:    Optional[Tuple[int, int]]   = None   # (w, h)
+        self._img_size:    Optional[Tuple[int, int]]   = None
         self._points:      List[Tuple[float, float]]   = []
         self._selected:    int                         = -1
-        self._selected_set: Set[int]                   = set()  # multi-kijelölés
+        self._selected_set: Set[int]                   = set()
 
         # Pont-húzás
         self._drag_idx: int  = -1
@@ -183,20 +186,20 @@ class PointEditorCanvas(QWidget):
         self._rpan_ly:     float = 0.0
 
         # Gumiszalag-kijelölés
-        self._rband_p0:     Optional[Tuple[float, float]] = None  # press pozíció
-        self._rband_p1:     Optional[Tuple[float, float]] = None  # aktuális végpont
-        self._rband_active: bool = False   # True ha elég mozgás volt
-        self._rband_ctrl:   bool = False   # Ctrl nyomva a bekeretezés alatt
+        self._rband_p0:     Optional[Tuple[float, float]] = None
+        self._rband_p1:     Optional[Tuple[float, float]] = None
+        self._rband_active: bool = False
+        self._rband_ctrl:   bool = False
 
         # Sokszög-ROI rajzolás
-        self._poly_pts:    List[Tuple[float, float]] = []   # csúcsok widget-koordinátában
-        self._poly_mode:   bool                      = False # rajzolás aktív
-        self._cursor_pos:  Tuple[float, float]       = (0.0, 0.0)  # preview vonal
-        self._display_poly: List[Tuple[float, float]]= []   # lezárt, menü alatt mutatva
+        self._poly_pts:    List[Tuple[float, float]] = []
+        self._poly_mode:   bool                      = False
+        self._cursor_pos:  Tuple[float, float]       = (0.0, 0.0)
+        self._display_poly: List[Tuple[float, float]]= []
 
-        # Tartós téglalap-ROI (képkoordban tárolva)
+        # Tartós téglalap-ROI
         self._roi_img:       Optional[QRectF]  = None
-        self._roi_mode:      str               = ""    # "" | "move" | handle-neve
+        self._roi_mode:      str               = ""
         self._roi_drag_wx:   float             = 0.0
         self._roi_drag_wy:   float             = 0.0
         self._roi_img_start: Optional[QRectF]  = None
@@ -205,19 +208,35 @@ class PointEditorCanvas(QWidget):
         self._drag_hover: bool = False
         self.setAcceptDrops(True)
 
-        # Zoom horgony: az első görgetésnél rögzül, egérmozgáskor törlődik
-        # Képkoordináta – ez marad a zoom középpontja az egész scroll-sorozatban
+        # Zoom horgony
         self._zoom_anchor: Optional[Tuple[float, float]] = None
 
-        # Vonallánc / ív rajzolás
-        self._draw_mode:  str                      = "point"  # "point"|"polyline"|"arc"
-        self._curve_pts:  List[Tuple[float,float]] = []       # csúcsok képkoordban
+        # ── Klikk-disambiguáció (250 ms timer) ──────────────────────────────
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(_CLICK_DISAMBIG_MS)
+        self._click_timer.timeout.connect(self._on_click_timer)
+        self._pending_click_pos: Optional[Tuple[float, float]] = None  # képkoord
 
-        # Vonallánc: húzásos szakasz-rajzolás állapota
-        self._polyline_pressed:   bool                         = False
-        self._polyline_seg_start: Optional[Tuple[float,float]] = None  # képkoord
-        self._polyline_press_wx:  float                        = 0.0   # widget px
-        self._polyline_press_wy:  float                        = 0.0
+        # ── Tárolt vonalak (a Widget állítja) ────────────────────────────────
+        self._polylines_data: List[List[Tuple[float, float]]] = []
+        # Vonallánc csúcs-húzás (500 ms hosszú nyomás engedélyezi)
+        self._poly_drag_pidx:  int  = -1
+        self._poly_drag_vidx:  int  = -1
+        self._poly_dragging:   bool = False
+        self._poly_drag_ready: bool = False   # True: 500 ms eltelt, húzás engedélyezve
+        # Hosszú-nyomás timer (500 ms)
+        self._poly_longpress_timer = QTimer(self)
+        self._poly_longpress_timer.setSingleShot(True)
+        self._poly_longpress_timer.setInterval(500)
+        self._poly_longpress_timer.timeout.connect(self._on_poly_longpress)
+        # Hover kiemelés
+        self._poly_hover_pidx: int = -1
+        self._poly_hover_vidx: int = -1
+
+        # ── Vonallánc előnézet (a Widget állítja be) ─────────────────────────
+        self._preview_polyline:    Optional[List[Tuple[float, float]]] = None
+        self._preview_cursor_line: bool = False   # True: szaggatott vonal az egérig
 
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -248,19 +267,50 @@ class PointEditorCanvas(QWidget):
             self.update()
 
     def set_selected_set(self, indices: List[int]) -> None:
-        """Multi-kijelölés szinkronizálása a párcanvasról."""
         self._selected_set = set(indices)
         self.update()
+
+    def set_preview_polyline(self,
+                              pts: Optional[List[Tuple[float, float]]],
+                              show_cursor_line: bool = False) -> None:
+        """
+        Vonallánc előnézet megjelenítése (a PointEditorWidget hívja).
+        pts=None esetén töröl.
+        show_cursor_line=True: szaggatott vonal az utolsó ponttól az egérig.
+        """
+        self._preview_polyline    = list(pts) if pts is not None else None
+        self._preview_cursor_line = show_cursor_line
+        self.update()
+
+    def set_polylines(self, data: list) -> None:
+        """
+        Tárolt vonalak beállítása.
+        data: [[pt0, pt1, ...], ...]  – minden elem egy vonallánc képkoord-listája.
+        """
+        self._polylines_data = [list(pl) for pl in data]
+        self.update()
+
+    def _hit_test_poly_vertex(self, wx: float, wy: float) -> Tuple[int, int]:
+        """
+        Vonallánc csúcsát teszteli hit-radiuszon belül.
+        Visszatér: (polyline_index, vertex_index) vagy (-1, -1).
+        """
+        for pidx, poly in enumerate(self._polylines_data):
+            for vidx, pt in enumerate(poly):
+                wpt = self._i2w(float(pt[0]), float(pt[1]))
+                if wpt is None:
+                    continue
+                if math.hypot(wx - wpt[0], wy - wpt[1]) <= _HIT_R:
+                    return pidx, vidx
+        return -1, -1
 
     # ── Tartós téglalap-ROI – publikus API ──────────────────────────────────
 
     def set_roi_from_image(self, rect: Optional[QRectF]) -> None:
-        """ROI beállítása képkoordináták alapján (a másik canvasról szinkronizálva)."""
         self._roi_img = QRectF(rect) if rect is not None else None
         self.update()
 
     def get_roi_image(self) -> Optional[QRectF]:
-        """Visszaadja a ROI-t képkoordinátában (None ha nincs)."""
         return QRectF(self._roi_img) if self._roi_img is not None else None
 
     def clear_roi(self) -> None:
@@ -269,34 +319,9 @@ class PointEditorCanvas(QWidget):
         self.update()
         self.roi_rect_changed.emit(None)
 
-    # ── Vonallánc / ív rajzolás – publikus API ───────────────────────────────
-
-    def set_draw_mode(self, mode: str) -> None:
-        """'point' | 'polyline' | 'arc' – módváltáskor töröl minden félkész görbét."""
-        if mode != self._draw_mode:
-            self._draw_mode = mode
-            self._curve_pts = []
-            self._polyline_pressed   = False
-            self._polyline_seg_start = None
-            self.update()
-
-    def cancel_curve(self) -> None:
-        """Félkész görbét töröl (pl. ha a másik canvas is törli)."""
-        self._curve_pts = []
-        self.update()
-
-    def _finish_curve(self) -> None:
-        """Görbe lezárása: curve_done jel küldése, ha van elég csúcs."""
-        pts = list(self._curve_pts)
-        self._curve_pts = []
-        self.update()
-        if len(pts) >= 2:
-            self.curve_done.emit(pts)
-
     # ── Tartós téglalap-ROI – belső segédek ─────────────────────────────────
 
     def _roi_widget_rect(self) -> Optional[QRectF]:
-        """ROI képkoordból widget-koordinátára."""
         if self._roi_img is None:
             return None
         tl = self._i2w(self._roi_img.left(),  self._roi_img.top())
@@ -308,7 +333,6 @@ class PointEditorCanvas(QWidget):
     _HANDLE_NAMES = ("tl", "tc", "tr", "ml", "mr", "bl", "bc", "br")
 
     def _roi_handles_w(self) -> dict:
-        """8 fogópont pozíciója widget-koordinátában → {name: (x, y)}."""
         r = self._roi_widget_rect()
         if r is None:
             return {}
@@ -325,14 +349,12 @@ class PointEditorCanvas(QWidget):
         }
 
     def _hit_roi_handle(self, wx: float, wy: float) -> str:
-        """Melyik fogópontra kattintott? Üres string ha egyik sem."""
         for name, (hx, hy) in self._roi_handles_w().items():
             if math.hypot(wx - hx, wy - hy) <= _ROI_HANDLE_R + 4:
                 return name
         return ""
 
     def _hit_roi_body(self, wx: float, wy: float) -> bool:
-        """A ROI belső területén van az egér (fogóponton kívül)?"""
         r = self._roi_widget_rect()
         if r is None:
             return False
@@ -366,7 +388,6 @@ class PointEditorCanvas(QWidget):
         return QRectF(left, top, dw, dh)
 
     def _w2i(self, wx: float, wy: float) -> Optional[Tuple[float, float]]:
-        """Widget-koordináta → képkoordináta (None ha kívül esik a képen)."""
         rect = self._display_rect()
         if rect is None or self._img_size is None:
             return None
@@ -378,7 +399,6 @@ class PointEditorCanvas(QWidget):
         return rx * iw, ry * ih
 
     def _i2w(self, ix: float, iy: float) -> Optional[Tuple[float, float]]:
-        """Képkoordináta → widget-koordináta."""
         rect = self._display_rect()
         if rect is None or self._img_size is None:
             return None
@@ -399,6 +419,20 @@ class PointEditorCanvas(QWidget):
                 best_dist, best_idx = d, i
         return best_idx
 
+    # ── Klikk-timer ─────────────────────────────────────────────────────────
+
+    def _on_click_timer(self) -> None:
+        """250 ms elteltével: egyszeres klikk megerősítése."""
+        if self._pending_click_pos is not None:
+            self.single_click_confirmed.emit(*self._pending_click_pos)
+            self._pending_click_pos = None
+
+    def _on_poly_longpress(self) -> None:
+        """500 ms elteltével: vonallánc csúcs mozgatás engedélyezése."""
+        if self._poly_drag_pidx >= 0:
+            self._poly_drag_ready = True
+            self.update()   # vizuális visszajelzés: csúcs kinézete megváltozik
+
     # ── Egéresemények ────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event) -> None:
@@ -412,12 +446,8 @@ class PointEditorCanvas(QWidget):
             self.middle_clicked.emit()
             return
 
-        # ── Jobb gomb ────────────────────────────────────────────────────────
+        # ── Jobb gomb – pásztázás ────────────────────────────────────────────
         if btn == Qt.MouseButton.RightButton:
-            # Jobb gomb MINDIG pásztázást indít – így nagyítás után sem vész el
-            # a nézetpozíció.  Ha a gomb elengedésekor nem volt valódi mozgás
-            # (rpan_moved == False), a mouseReleaseEvent elvégzi a klikk-akciót
-            # (undo / pont törlés).
             self._rpan_active = True
             self._rpan_moved  = False
             self._rpan_lx     = wx
@@ -429,26 +459,7 @@ class PointEditorCanvas(QWidget):
         if btn == Qt.MouseButton.LeftButton:
             ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
-            # ── Vonallánc: press = drag-szakasz kezdete ──────────────────────
-            if self._draw_mode == "polyline" and not ctrl:
-                coords = self._w2i(wx, wy)
-                if coords is not None:
-                    self._polyline_pressed   = True
-                    self._polyline_seg_start = coords
-                    self._polyline_press_wx  = wx
-                    self._polyline_press_wy  = wy
-                    self.update()
-                return
-
-            # ── Ív mód: klikk = csúcs hozzáadása ────────────────────────────
-            if self._draw_mode == "arc" and not ctrl:
-                coords = self._w2i(wx, wy)
-                if coords is not None:
-                    self._curve_pts.append(coords)
-                    self.update()
-                return
-
-            # ── ROI fogópont / mozgatás ── (Ctrl nélkül, ROI létezik) ────────
+            # ── ROI fogópont / mozgatás ──────────────────────────────────────
             if not ctrl and self._roi_img is not None:
                 handle = self._hit_roi_handle(wx, wy)
                 if handle:
@@ -464,59 +475,92 @@ class PointEditorCanvas(QWidget):
                     self._roi_img_start = QRectF(self._roi_img)
                     return
 
+            # ── Vonallánc csúcs fogása (500 ms hosszú nyomás engedélyezi) ────
+            if not ctrl:
+                ppidx, pvidx = self._hit_test_poly_vertex(wx, wy)
+                if ppidx >= 0:
+                    self._poly_drag_pidx   = ppidx
+                    self._poly_drag_vidx   = pvidx
+                    self._poly_dragging    = False
+                    self._poly_drag_ready  = False
+                    # Klikk-timer leállítása: ne induljon pontlerakás
+                    self._click_timer.stop()
+                    self._pending_click_pos = None
+                    # Hosszú-nyomás timer indítása
+                    self._poly_longpress_timer.start(500)
+                    return
+
             idx = self._hit_test(wx, wy)
             if idx >= 0:
                 if ctrl:
-                    # Ctrl + bal klikk ponton → toggle multi-kijelölés
+                    # Ctrl + klikk ponton → multi-kijelölés toggle
                     if idx in self._selected_set:
                         self._selected_set.discard(idx)
                     else:
                         self._selected_set.add(idx)
                     self.selection_changed.emit(list(self._selected_set))
                 else:
-                    # Normál bal klikk ponton → kijelölés + húzás előkészítése
+                    # Bal klikk ponton → kijelölés + húzás előkészítése
                     self._drag_idx = idx
                     self._dragging = False
                     if idx not in self._selected_set:
                         self._selected_set.clear()
                     self.point_selected.emit(idx)
             else:
-                # Kattintás üres területen → gumiszalag előkészítése
+                # Klikk üres területen → gumiszalag VAGY pontlerakás (timer)
                 coords = self._w2i(wx, wy)
                 if coords is not None:
                     self._rband_p0    = (wx, wy)
                     self._rband_p1    = (wx, wy)
-                    self._rband_ctrl  = bool(
-                        event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                    self._rband_ctrl  = ctrl
                     self._rband_active = False
+                    if not ctrl:
+                        # Soft-zone: ha közel vagyunk egy vonallánc-csúcshoz
+                        # (2× hit radius), NE indítsuk a pontlerakó timert –
+                        # a klikk valószínűleg eltévesztett csúcsfogás kísérlet.
+                        near_vertex = False
+                        for _poly in self._polylines_data:
+                            for _pt in _poly:
+                                _wpt = self._i2w(float(_pt[0]), float(_pt[1]))
+                                if (_wpt is not None and
+                                        math.hypot(wx - _wpt[0],
+                                                   wy - _wpt[1]) <= _HIT_R * 2):
+                                    near_vertex = True
+                                    break
+                            if near_vertex:
+                                break
+                        if not near_vertex:
+                            # Elindítjuk a 250 ms timert az egyszeres klikk detektálásához
+                            self._pending_click_pos = coords
+                            self._click_timer.start(_CLICK_DISAMBIG_MS)
 
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         """
-        Ctrl+dupla-klikk sokszög módban → sokszög lezárása + ROI menü.
-        Dupla kattintás üres területen (Ctrl nélkül) → új pontpár hozzáadása.
-        Vonallánc módban: a dupla klikk NEM csinál semmit – a lezárás
-        klikk (press+release mozgás nélkül) által történik.
+        Dupla klikk: klikk-timer törlése + double_click_confirmed jel.
+        Ctrl+dupla-klikk sokszög módban: sokszög lezárása.
+        Vonallánc csúcson: elnyelés (ne indítson új vonalat).
         """
         if event.button() == Qt.MouseButton.LeftButton:
-            wx = float(event.position().x())
-            wy = float(event.position().y())
+            wx   = float(event.position().x())
+            wy   = float(event.position().y())
             ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
-            # ── Vonallánc mód: kettős klikk → lezárás ──
-            if self._draw_mode == "polyline":
-                if len(self._curve_pts) >= 2:
-                    self._finish_curve()
-                super().mouseDoubleClickEvent(event)
-                return
+            # Timer törlése: ez NEM egyszeres klikk
+            self._click_timer.stop()
+            self._pending_click_pos = None
+            self._poly_longpress_timer.stop()
+            self._poly_drag_ready = False
+            self._poly_drag_pidx  = -1
+            self._poly_drag_vidx  = -1
 
-            # ── Ív mód: kettős klikk → lezárás ──
-            if self._draw_mode == "arc":
-                if len(self._curve_pts) >= 3:
-                    self._finish_curve()
-                super().mouseDoubleClickEvent(event)
-                return
+            # Dupla klikk vonallánc csúcson → ne indítson új vonalat
+            if not ctrl:
+                ppidx, _ = self._hit_test_poly_vertex(wx, wy)
+                if ppidx >= 0:
+                    super().mouseDoubleClickEvent(event)
+                    return
 
             # Ctrl+dupla-klikk sokszög módban → lezárás
             if ctrl and self._poly_mode and len(self._poly_pts) >= 3:
@@ -527,8 +571,8 @@ class PointEditorCanvas(QWidget):
                 super().mouseDoubleClickEvent(event)
                 return
 
-            # Ha sokszög mód aktív de Ctrl nélküli dupla-klikk → megszakítás
             if self._poly_mode:
+                # Dupla klikk Ctrl nélkül sokszög módban → megszakítás
                 self._poly_mode = False
                 self._poly_pts  = []
                 self._rband_active = False
@@ -538,26 +582,23 @@ class PointEditorCanvas(QWidget):
                 super().mouseDoubleClickEvent(event)
                 return
 
-            # Normál dupla-klikk: gumiszalag törlése, pont hozzáadása
+            # Normál dupla klikk: double_click_confirmed jel
             self._rband_active = False
             self._rband_p0     = None
             self._rband_p1     = None
-            idx = self._hit_test(wx, wy)
-            if idx < 0:
-                coords = self._w2i(wx, wy)
-                if coords is not None:
-                    self.point_selected.emit(-1)
-                    self.point_added.emit(*coords)
+            coords = self._w2i(wx, wy)
+            if coords is not None and not ctrl:
+                self.double_click_confirmed.emit(*coords)
+
         super().mouseDoubleClickEvent(event)
 
     def _close_polygon(self) -> None:
-        """Sokszög lezárása és roi_ready jel küldése."""
         if len(self._poly_pts) < 3:
             return
         poly = list(self._poly_pts)
         self._poly_mode    = False
         self._poly_pts     = []
-        self._display_poly = poly   # megőrzi amíg a menü megjelenik
+        self._display_poly = poly
         self.update()
         self.roi_ready.emit(poly)
 
@@ -565,22 +606,20 @@ class PointEditorCanvas(QWidget):
         wx = float(event.position().x())
         wy = float(event.position().y())
 
-        # Kurzorpozíció frissítése (sokszög + görbe preview vonalhoz)
         self._cursor_pos = (wx, wy)
-        if self._poly_mode or self._polyline_pressed or (
-                self._draw_mode in ("polyline", "arc") and self._curve_pts):
+
+        # Sokszög preview, vonallánc preview cursor-vonal → újrarajzolás
+        if self._poly_mode or (self._preview_polyline and self._preview_cursor_line):
             self.update()
 
-        # Zoom horgony törlése: ha az egér megmozdul, a következő görgetés
-        # az új pozíciót veszi fel középpontként
+        # Zoom horgony törlése
         if self._zoom_anchor is not None:
             self._zoom_anchor = None
 
-        # ── ROI drag: mozgatás vagy átméretezés ──────────────────────────────
+        # ── ROI drag ─────────────────────────────────────────────────────────
         if self._roi_mode and (event.buttons() & Qt.MouseButton.LeftButton):
             start_ic = self._w2i(self._roi_drag_wx, self._roi_drag_wy)
             curr_ic  = self._w2i(wx, wy)
-            # Ha az egér a kép területén kívülre ment, klampoljuk a képre
             rect = self._display_rect()
             if rect is None or self._roi_img_start is None:
                 return
@@ -601,7 +640,6 @@ class PointEditorCanvas(QWidget):
                 if "r" in m: r.setRight(r.right() + dx)
                 if "t" in m: r.setTop(r.top()     + dy)
                 if "b" in m: r.setBottom(r.bottom() + dy)
-            # Klampoljuk a kép határaira
             if self._img_size:
                 iw, ih = self._img_size
                 r = r.normalized()
@@ -618,6 +656,12 @@ class PointEditorCanvas(QWidget):
             hit    = self._hit_test(wx, wy)
             rect   = self._display_rect()
             handle = self._hit_roi_handle(wx, wy)
+            # Vonallánc csúcs hover frissítés
+            new_ph_pidx, new_ph_vidx = self._hit_test_poly_vertex(wx, wy)
+            if new_ph_pidx != self._poly_hover_pidx or new_ph_vidx != self._poly_hover_vidx:
+                self._poly_hover_pidx = new_ph_pidx
+                self._poly_hover_vidx = new_ph_vidx
+                self.update()
             if self._poly_mode:
                 self.setCursor(Qt.CursorShape.CrossCursor)
             elif handle:
@@ -625,6 +669,8 @@ class PointEditorCanvas(QWidget):
                     handle, Qt.CursorShape.ArrowCursor))
             elif self._hit_roi_body(wx, wy):
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
+            elif new_ph_pidx >= 0:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
             elif hit >= 0:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
             elif rect is not None and rect.contains(wx, wy):
@@ -648,10 +694,30 @@ class PointEditorCanvas(QWidget):
             dist = math.hypot(wx - self._rband_p0[0], wy - self._rband_p0[1])
             if dist >= self._RBAND_MIN:
                 self._rband_active = True
+                # Húzás észlelve: klikk-timer törlése (ez drag, nem klikk)
+                if self._click_timer.isActive():
+                    self._click_timer.stop()
+                    self._pending_click_pos = None
             if self._rband_active:
                 self._rband_p1 = (wx, wy)
                 self.update()
-                return   # pont-húzás NEM fut gumiszalag közben
+                return
+
+        # ── Vonallánc csúcs húzása (csak 500 ms hosszú nyomás után) ─────────
+        if self._poly_drag_pidx >= 0 and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._poly_drag_ready:
+                coords = self._w2i(wx, wy)
+                if coords is not None:
+                    ix, iy = coords
+                    self._poly_dragging = True
+                    poly = self._polylines_data[self._poly_drag_pidx]
+                    if 0 <= self._poly_drag_vidx < len(poly):
+                        poly[self._poly_drag_vidx] = (ix, iy)
+                    self.update()
+                    self.polyline_vertex_moved.emit(
+                        self._poly_drag_pidx, self._poly_drag_vidx, ix, iy)
+            # return minden esetben: ne induljon gumiszalag vagy pont-mozgatás
+            return
 
         # ── Bal gombos pont-húzás ─────────────────────────────────────────────
         if self._drag_idx >= 0 and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -675,55 +741,32 @@ class PointEditorCanvas(QWidget):
                 QRectF(self._roi_img) if self._roi_img else None)
             return
 
-        # ── Vonallánc: elengedés = szakasz lerakása VAGY lezárás ─────────────
-        if event.button() == Qt.MouseButton.LeftButton and self._polyline_pressed:
-            self._polyline_pressed = False
-            wx_r = float(event.position().x())
-            wy_r = float(event.position().y())
-            drag_dist = math.hypot(wx_r - self._polyline_press_wx,
-                                   wy_r - self._polyline_press_wy)
-            if drag_dist < self._RBAND_MIN:
-                # Klikk (nincs érdemi mozgás) → nincs hatás (2× klikk zárja le)
-                self.update()
-            else:
-                # Húzás volt → új szakasz hozzáadása a vonallánchoz
-                coords_end = self._w2i(wx_r, wy_r)
-                if coords_end is not None and self._polyline_seg_start is not None:
-                    if not self._curve_pts:
-                        # Első szakasz: a kezdőpontot is be kell venni
-                        self._curve_pts.append(self._polyline_seg_start)
-                    # Végpont hozzáadása (ha különbözik az utolsótól)
-                    if self._curve_pts[-1] != coords_end:
-                        self._curve_pts.append(coords_end)
-                self.update()
-            self._polyline_seg_start = None
-            return
-
         if event.button() == Qt.MouseButton.LeftButton:
             if self._rband_active:
-                # Gumiszalag lezárása (húzás volt)
                 self._finalize_rband()
             elif self._rband_p0 is not None and self._rband_ctrl:
-                # Ctrl+klikk húzás nélkül → sokszög csúcs hozzáadása
                 wx, wy = self._rband_p0
                 if self._poly_mode and self._poly_pts:
-                    # Dupla-klikk miatt ne adjunk hozzá azonos pozíciójú pontot
                     lx, ly = self._poly_pts[-1]
                     if math.hypot(wx - lx, wy - ly) > 5:
                         self._poly_pts.append((wx, wy))
                 else:
-                    # Első csúcs → sokszög mód indítása
                     self._poly_mode = True
                     self._poly_pts  = [(wx, wy)]
-            self._rband_active = False
-            self._rband_p0     = None
-            self._rband_p1     = None
-            self._drag_idx     = -1
-            self._dragging     = False
+            self._rband_active         = False
+            self._rband_p0             = None
+            self._rband_p1             = None
+            self._drag_idx             = -1
+            self._dragging             = False
+            self._poly_longpress_timer.stop()
+            self._poly_drag_pidx       = -1
+            self._poly_drag_vidx       = -1
+            self._poly_dragging        = False
+            self._poly_drag_ready      = False
             self.update()
 
         if event.button() == Qt.MouseButton.RightButton:
-            was_click = not self._rpan_moved   # nem volt érdemi mozgás → klikk
+            was_click = not self._rpan_moved
             wx_r = float(event.position().x())
             wy_r = float(event.position().y())
             self._rpan_active = False
@@ -731,40 +774,34 @@ class PointEditorCanvas(QWidget):
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
             if was_click:
-                # ── Görbe módban: jobb klikk = undo ─────────────────────────
-                if self._draw_mode in ("polyline", "arc"):
-                    if self._polyline_pressed:
-                        # Félkész drag megszakítása
-                        self._polyline_pressed   = False
-                        self._polyline_seg_start = None
-                    elif self._curve_pts:
-                        self._curve_pts.pop()
-                    self.update()
-                else:
-                    # ── Pont módban: jobb klikk ponton = törlés ─────────────
-                    idx = self._hit_test(wx_r, wy_r)
-                    if idx >= 0:
-                        self._selected_set.discard(idx)
-                        if self._selected == idx:
-                            self._selected = -1
-                        self.point_deleted.emit(idx)
+                # Vonallánc csúcs jobb klikk:
+                #   sima jobb klikk  → csak ezt a csúcsot törli
+                #   Ctrl+jobb klikk  → egész vonalat törli
+                ctrl_r = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                ppidx, pvidx = self._hit_test_poly_vertex(wx_r, wy_r)
+                if ppidx >= 0:
+                    if ctrl_r:
+                        self.polyline_delete_requested.emit(ppidx)
+                    else:
+                        self.polyline_vertex_delete_requested.emit(ppidx, pvidx)
+                    super().mouseReleaseEvent(event)
+                    return
+                idx = self._hit_test(wx_r, wy_r)
+                if idx >= 0:
+                    self._selected_set.discard(idx)
+                    if self._selected == idx:
+                        self._selected = -1
+                    self.point_deleted.emit(idx)
 
         super().mouseReleaseEvent(event)
 
     def _finalize_rband(self) -> None:
-        """
-        Gumiszalag elengedésekor:
-        - normál keret → multi-kijelölés (selection_changed jel)
-        - Ctrl+keret   → ROI-keresés (roi_search_requested jel, képkoordinátában)
-        """
         if self._rband_p0 is None or self._rband_p1 is None:
             return
         x0, y0 = self._rband_p0
         x1, y1 = self._rband_p1
         rx0, rx1 = min(x0, x1), max(x0, x1)
         ry0, ry1 = min(y0, y1), max(y0, y1)
-
-        # Pontok a keretben
         inside = []
         for i, (ix, iy) in enumerate(self._points):
             wpt = self._i2w(ix, iy)
@@ -773,21 +810,16 @@ class PointEditorCanvas(QWidget):
             px, py = wpt
             if rx0 <= px <= rx1 and ry0 <= py <= ry1:
                 inside.append(i)
-
         if self._rband_ctrl:
-            # Ctrl-keret: TARTÓS téglalap-ROI létrehozása képkoordinátában
             tl = self._w2i(rx0, ry0)
             br = self._w2i(rx1, ry1)
             if tl is not None and br is not None:
                 candidate = QRectF(QPointF(*tl), QPointF(*br)).normalized()
-                # Minimum méret ellenőrzés: legalább 10×10 képpont kell,
-                # különben apró Ctrl+húzás érvénytelen ROI-t hozna létre.
                 if candidate.width() >= _ROI_MIN_SIZE and candidate.height() >= _ROI_MIN_SIZE:
                     self._roi_img = candidate
                     self.update()
                     self.roi_rect_changed.emit(QRectF(self._roi_img))
         else:
-            # Normál keret: multi-kijelölés
             self._selected_set = set(inside)
             if inside:
                 self.point_selected.emit(inside[0])
@@ -804,14 +836,8 @@ class PointEditorCanvas(QWidget):
         self.update()
 
     def wheelEvent(self, event) -> None:
-        """
-        Görgetés (Ctrl nélkül) → zoom az aktív pont (vagy egér) körül.
-        Ctrl+görgetés           → pontindex léptetése (fel = kisebb, le = nagyobb).
-        """
         delta = event.angleDelta().y()
-
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            # ── Ctrl+görgetés: pontindex léptetés ────────────────────────────
             n = len(self._points)
             if n == 0:
                 event.accept()
@@ -820,9 +846,7 @@ class PointEditorCanvas(QWidget):
             new_idx = (cur - 1) % n if delta > 0 else (cur + 1) % n
             self.point_selected.emit(new_idx)
             event.accept()
-
         else:
-            # ── Görgetés: zoom ────────────────────────────────────────────────
             if self._img_size is None:
                 event.accept()
                 return
@@ -831,24 +855,17 @@ class PointEditorCanvas(QWidget):
             if new_zoom == self._zoom:
                 event.accept()
                 return
-
-            # Zoom középpontja: az első görgésnél rögzítjük az egér pozícióját
-            # (képkoordban), majd minden további görgetés ezt a pontot tartja
-            # helyén.  Ha az egér megmozdul (mouseMoveEvent), a horgony törlődik
-            # és a következő görgetés új középpontot vesz fel.
             if self._zoom_anchor is None:
                 mx  = float(event.position().x())
                 my  = float(event.position().y())
                 hit = self._w2i(mx, my)
                 if hit:
                     self._zoom_anchor = hit
-                # Ha a kurzor a képen kívül van, fallback: aktív pont / centrum
                 if self._zoom_anchor is None:
                     if 0 <= self._selected < len(self._points):
                         self._zoom_anchor = tuple(self._points[self._selected])  # type: ignore[assignment]
                     else:
                         self._zoom_anchor = (self._pan_cx, self._pan_cy)
-
             fx, fy       = self._zoom_anchor
             ratio        = self._zoom / new_zoom
             self._pan_cx = fx + (self._pan_cx - fx) * ratio
@@ -858,13 +875,6 @@ class PointEditorCanvas(QWidget):
             event.accept()
 
     def keyPressEvent(self, event) -> None:
-        """
-        Space         → zoom szinkron a másik canvasra
-        Ctrl+0        → zoom visszaállítás
-        Delete        → kijelölt pont(ok) törlése (egyszeres vagy multi)
-        Ctrl+Z        → visszavonás kérése
-        Nyílbillentyű → aktív pont mozgatása 1 px (Shift = 10 px)
-        """
         key = event.key()
 
         if key == Qt.Key.Key_Space and self._img_size is not None:
@@ -889,34 +899,16 @@ class PointEditorCanvas(QWidget):
             event.accept()
 
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            # Enter → görbe lezárása ha görbe módban vagyunk
-            if self._draw_mode == "polyline" and len(self._curve_pts) >= 2:
-                self._finish_curve()
-            elif self._draw_mode == "arc" and len(self._curve_pts) >= 3:
-                self._finish_curve()
-            elif self._poly_mode and len(self._poly_pts) >= 3:
+            if self._poly_mode and len(self._poly_pts) >= 3:
                 self._close_polygon()
             event.accept()
 
         elif key == Qt.Key.Key_Escape:
-            # Escape → félkész görbe, drag vagy sokszög megszakítása
-            if self._draw_mode in ("polyline", "arc") and (
-                    self._curve_pts or self._polyline_pressed):
-                self._curve_pts          = []
-                self._polyline_pressed   = False
-                self._polyline_seg_start = None
-                self.update()
-            elif self._poly_mode:
+            self.escape_pressed.emit()
+            if self._poly_mode:
                 self._poly_mode    = False
                 self._poly_pts     = []
                 self._display_poly = []
-                self.update()
-            event.accept()
-
-        elif key == Qt.Key.Key_Backspace:
-            # Backspace → utolsó csúcs törlése görbe módban
-            if self._draw_mode in ("polyline", "arc") and self._curve_pts:
-                self._curve_pts.pop()
                 self.update()
             event.accept()
 
@@ -999,18 +991,23 @@ class PointEditorCanvas(QWidget):
         header.setEnabled(False)
         menu.addAction(header)
         menu.addSeparator()
-
         act_sel = QAction(tr("Kiválasztás"), self)
         act_sel.triggered.connect(lambda: self.point_selected.emit(index))
         menu.addAction(act_sel)
-
         act_del = QAction(tr("Törlés  (párjával együtt)"), self)
         act_del.triggered.connect(lambda: self.point_deleted.emit(index))
         menu.addAction(act_del)
-
         menu.exec(global_pos)
 
     # ── Rajzolás – paintEvent ─────────────────────────────────────────────────
+
+    def _paint_overlay(self, painter: QPainter) -> None:
+        """
+        Felülírható hook: a paintEvent VÉGÉN hívódik meg, az összes alap-rajzolás
+        befejezése után, de MÉG aktív painter-rel.
+        Alosztályok (pl. GCPCanvas) ebben rajzolhatnak rá az alap-rétegre
+        anélkül, hogy új QPainter-t kellene létrehozniuk.
+        """
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -1028,8 +1025,11 @@ class PointEditorCanvas(QWidget):
             painter.setFont(font)
             painter.drawText(
                 self.rect(), Qt.AlignmentFlag.AlignCenter,
-                f"{self.title}\n\nNincs kép betöltve\n\nDupla klikk: pont hozzáadása"
+                f"{self.title}\n\nNincs kép betöltve\n\n"
+                "Klikk: pont  |  2× klikk: vonallánc start/vég"
             )
+            self._paint_overlay(painter)
+            painter.end()
             return
 
         # Kép kirajzolása
@@ -1045,7 +1045,6 @@ class PointEditorCanvas(QWidget):
         # ── Tartós téglalap-ROI overlay ──────────────────────────────────────
         roi_w = self._roi_widget_rect()
         if roi_w is not None and rect is not None:
-            # Sötétítés a ROI-n kívüli területen
             outside = QPainterPath()
             outside.addRect(QRectF(rect))
             inside = QPainterPath()
@@ -1054,17 +1053,14 @@ class PointEditorCanvas(QWidget):
             painter.setBrush(QBrush(_C_ROI_OUTSIDE))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPath(shadow)
-            # ROI keret + belső fill
             painter.setPen(QPen(_C_ROI_BORDER, 2))
             painter.setBrush(QBrush(_C_ROI_FILL))
             painter.drawRect(roi_w)
-            # 8 fogópont
             painter.setPen(QPen(_C_ROI_BORDER, 1.5))
             painter.setBrush(QBrush(_C_ROI_HANDLE))
             for hx, hy in self._roi_handles_w().values():
                 r = _ROI_HANDLE_R
                 painter.drawEllipse(int(hx) - r, int(hy) - r, r * 2, r * 2)
-            # Méret-felirat
             font_roi = QFont()
             font_roi.setPointSize(9)
             painter.setFont(font_roi)
@@ -1073,7 +1069,104 @@ class PointEditorCanvas(QWidget):
                    f"{int(self._roi_img.height())} px")
             painter.drawText(int(roi_w.left()) + 4, int(roi_w.top()) - 5, lbl)
 
-        # Pontok
+        # ── Vonallánc előnézet overlay ───────────────────────────────────────
+        if self._preview_polyline and len(self._preview_polyline) >= 1:
+            pts_w = [self._i2w(x, y) for x, y in self._preview_polyline]
+            pts_w = [p for p in pts_w if p is not None]
+            if pts_w:
+                # Összekötő vonalak
+                painter.setPen(QPen(_C_POLYLINE, 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for k in range(len(pts_w) - 1):
+                    ax, ay = pts_w[k]
+                    bx, by = pts_w[k + 1]
+                    painter.drawLine(int(ax), int(ay), int(bx), int(by))
+                # Szaggatott vonal az egér felé (csak a forrás canvas-on)
+                if self._preview_cursor_line:
+                    lx, ly = pts_w[-1]
+                    cx, cy = self._cursor_pos
+                    painter.setPen(QPen(_C_POLYLINE, 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(int(lx), int(ly), int(cx), int(cy))
+                # Csúcspontok
+                painter.setPen(QPen(_C_POLYLINE, 2))
+                for k, (px, py) in enumerate(pts_w):
+                    r = 7 if k == 0 else 4
+                    painter.setBrush(
+                        QBrush(_C_POLYLINE) if k == 0 else Qt.BrushStyle.NoBrush)
+                    painter.drawEllipse(int(px) - r, int(py) - r, r * 2, r * 2)
+                # Tipp szöveg
+                if self._preview_cursor_line:
+                    painter.setPen(QPen(_C_POLYLINE, 1))
+                    font_c = QFont()
+                    font_c.setPointSize(9)
+                    painter.setFont(font_c)
+                    n = len(self._preview_polyline)
+                    painter.drawText(
+                        6, self.height() - 8,
+                        tr(f"Vonallánc ({n} csúcs)  |  "
+                           "Klikk: csúcs  |  2× klikk: kész  |  Esc: mégse"))
+
+        # ── Tárolt vonalak (persistent polylines) ───────────────────────────
+        _POLY_COLORS = [
+            QColor("#22ddcc"), QColor("#ff8a3d"), QColor("#44aaff"),
+            QColor("#ff44aa"), QColor("#aaff44"),
+        ]
+        for pidx, poly in enumerate(self._polylines_data):
+            if len(poly) < 2:
+                continue
+            color = _POLY_COLORS[pidx % len(_POLY_COLORS)]
+            pts_w = [self._i2w(float(pt[0]), float(pt[1])) for pt in poly]
+            # Összekötő vonalak
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for k in range(len(pts_w) - 1):
+                if pts_w[k] is None or pts_w[k + 1] is None:
+                    continue
+                ax, ay = pts_w[k]
+                bx, by = pts_w[k + 1]
+                painter.drawLine(int(ax), int(ay), int(bx), int(by))
+            # Csúcsok
+            for vidx, wpt in enumerate(pts_w):
+                if wpt is None:
+                    continue
+                px, py = wpt
+                hover     = (pidx == self._poly_hover_pidx and vidx == self._poly_hover_vidx)
+                pressing  = (pidx == self._poly_drag_pidx  and vidx == self._poly_drag_vidx
+                             and not self._poly_drag_ready)   # nyomva tartva, 500 ms előtt
+                ready     = (pidx == self._poly_drag_pidx  and vidx == self._poly_drag_vidx
+                             and self._poly_drag_ready)        # 500 ms lejárt → mozgatható
+
+                if ready:
+                    r, alpha, pen_w = 10, 230, 3   # aktívan mozgatható: nagy, vastag
+                elif pressing:
+                    r, alpha, pen_w = 7, 140, 2    # várakozás: közepes
+                elif hover:
+                    r, alpha, pen_w = 7, 160, 2    # hover
+                else:
+                    r, alpha, pen_w = 5, 80,  2    # normál
+
+                fill = QColor(color.red(), color.green(), color.blue(), alpha)
+                painter.setPen(QPen(color, pen_w))
+                painter.setBrush(QBrush(fill))
+                painter.drawEllipse(int(px) - r, int(py) - r, r * 2, r * 2)
+
+                # Kis ikon: 500 ms-t vár → szaggatott külső kör
+                if pressing:
+                    pen_dash = QPen(color, 1, Qt.PenStyle.DashLine)
+                    painter.setPen(pen_dash)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawEllipse(int(px) - r - 4, int(py) - r - 4,
+                                        (r + 4) * 2, (r + 4) * 2)
+            # Vonallánc sorszám (bal felső sarokba)
+            if pts_w[0] is not None:
+                fx, fy = pts_w[0]
+                font_p = QFont()
+                font_p.setPointSize(8)
+                painter.setFont(font_p)
+                painter.setPen(QPen(color, 1))
+                painter.drawText(int(fx) + 9, int(fy) - 5, f"L{pidx + 1}")
+
+        # ── Pontok ───────────────────────────────────────────────────────────
         font = QFont()
         font.setPointSize(9)
         font.setBold(True)
@@ -1108,7 +1201,7 @@ class PointEditorCanvas(QWidget):
             painter.setPen(QPen(txt_color, 1))
             painter.drawText(int(px) + r + 3, int(py) + 4, str(i + 1))
 
-        # Gumiszalag-keret
+        # ── Gumiszalag-keret ─────────────────────────────────────────────────
         if self._rband_active and self._rband_p0 and self._rband_p1:
             x0, y0 = self._rband_p0
             x1, y1 = self._rband_p1
@@ -1121,14 +1214,12 @@ class PointEditorCanvas(QWidget):
             painter.drawRect(int(rx0), int(ry0), int(rx1 - rx0), int(ry1 - ry0))
 
         # ── Sokszög-ROI rajzolás ─────────────────────────────────────────────
-
         def _draw_poly(pts, color, closed=False):
             if len(pts) < 1:
                 return
             pen = QPen(color, 2, Qt.PenStyle.SolidLine)
             painter.setPen(pen)
             painter.setBrush(QBrush(_C_POLY_FILL))
-            # Élek
             for k in range(len(pts) - 1):
                 ax, ay = pts[k]
                 bx, by = pts[k + 1]
@@ -1137,7 +1228,6 @@ class PointEditorCanvas(QWidget):
                 ax, ay = pts[-1]
                 bx, by = pts[0]
                 painter.drawLine(int(ax), int(ay), int(bx), int(by))
-            # Csúcsok
             for k, (px, py) in enumerate(pts):
                 if k == 0:
                     r = 6
@@ -1148,103 +1238,22 @@ class PointEditorCanvas(QWidget):
                 painter.drawEllipse(int(px) - r, int(py) - r, r * 2, r * 2)
 
         if self._poly_mode and self._poly_pts:
-            # Rajzolás alatt: folyamatos élek + preview vonal az egér felé
             _draw_poly(self._poly_pts, _C_POLY_DRAW, closed=False)
             if len(self._poly_pts) >= 1:
                 lx, ly = self._poly_pts[-1]
                 cx, cy = self._cursor_pos
                 painter.setPen(QPen(_C_POLY_DRAW, 1, Qt.PenStyle.DashLine))
                 painter.drawLine(int(lx), int(ly), int(cx), int(cy))
-            # Segítség szöveg
             painter.setPen(QPen(QColor("#FFB300"), 1))
             font2 = QFont()
             font2.setPointSize(9)
             painter.setFont(font2)
             n = len(self._poly_pts)
-            hint = (f"Ctrl+klikk: csúcs ({n} db)  |  Enter / Ctrl+2×klikk: lezár"
-                    "  |  Esc: mégse")
+            hint = (f"Ctrl+klikk: csúcs ({n} db)  |  "
+                    "Enter / Ctrl+2×klikk: lezár  |  Esc: mégse")
             painter.drawText(6, self.height() - 8, hint)
-
         elif self._display_poly:
-            # Lezárt sokszög: menü megjelenéséig látható
             _draw_poly(self._display_poly, _C_POLY_DONE, closed=True)
-
-        # ── Vonallánc / ív rajzolás overlay ─────────────────────────────────
-        _in_curve_mode = self._draw_mode in ("polyline", "arc")
-        if _in_curve_mode and (self._curve_pts or self._polyline_pressed):
-            c_curve   = QColor("#22ddcc") if self._draw_mode == "polyline" else QColor("#ffaa44")
-            pen_solid = QPen(c_curve, 2, Qt.PenStyle.SolidLine)
-            pen_dash  = QPen(c_curve, 1, Qt.PenStyle.DashLine)
-
-            # Lezárt csúcsok widget-koordinátában
-            pts_w = [self._i2w(x, y) for x, y in self._curve_pts]
-            pts_w = [p for p in pts_w if p is not None]
-
-            # Összekötő élek a már lerakott csúcsok között
-            if pts_w:
-                painter.setPen(pen_solid)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                for k in range(len(pts_w) - 1):
-                    ax, ay = pts_w[k]
-                    bx, by = pts_w[k + 1]
-                    painter.drawLine(int(ax), int(ay), int(bx), int(by))
-
-            cx, cy = self._cursor_pos
-
-            if self._polyline_pressed and self._polyline_seg_start is not None:
-                # Aktív drag: vonal a drag kezdőpontjától az egérig
-                seg_w = self._i2w(*self._polyline_seg_start)
-                if seg_w is not None:
-                    sx, sy = seg_w
-                    painter.setPen(pen_solid)
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawLine(int(sx), int(sy), int(cx), int(cy))
-                    # Drag kezdőpont jelölése
-                    r = 5
-                    painter.setPen(QPen(c_curve, 2))
-                    painter.setBrush(QBrush(c_curve))
-                    painter.drawEllipse(int(sx) - r, int(sy) - r, r * 2, r * 2)
-            elif pts_w:
-                # Nincs aktív drag, de van már szakasz → preview az egér felé
-                lx, ly = pts_w[-1]
-                painter.setPen(pen_dash)
-                painter.drawLine(int(lx), int(ly), int(cx), int(cy))
-
-            # Csúcspontok (az első kicsit nagyobb)
-            if pts_w:
-                painter.setPen(QPen(c_curve, 2))
-                for k, (px, py) in enumerate(pts_w):
-                    r = 7 if k == 0 else 4
-                    painter.setBrush(QBrush(c_curve) if k == 0 else Qt.BrushStyle.NoBrush)
-                    painter.drawEllipse(int(px) - r, int(py) - r, r * 2, r * 2)
-
-            # Állapot / tipp szöveg
-            n_pts = len(self._curve_pts)
-            if self._draw_mode == "polyline":
-                if self._polyline_pressed:
-                    hint = tr("Vonallánc – HÚZÁS  |  Ereszt: szakasz lerak  "
-                              "|  Jobb klikk: drag törlése  |  Esc: mégse")
-                elif n_pts == 0:
-                    hint = tr("Vonallánc – Nyomd le és húzd az első szakaszt")
-                else:
-                    hint = tr(f"Vonallánc – {n_pts} csúcs  |  "
-                              "Húzz újabb szakaszt  |  2× klikk: kész  "
-                              "|  Enter: kész  |  Jobb klikk / Backspace: töröl  |  Esc: mégse")
-            else:  # arc
-                if n_pts == 0:
-                    hint = tr("Ív – klikk: kezdőpont")
-                elif n_pts == 1:
-                    hint = tr("Ív – klikk: végpont")
-                elif n_pts == 2:
-                    hint = tr("Ív – klikk: köztes pont az ívon  |  2× klikk: kész (12 pont)")
-                else:
-                    hint = tr(f"Ív – {n_pts} pont  |  Klikk: még köztes pont  "
-                              "|  2× klikk: kész (12 pont)  |  Backspace: töröl  |  Esc: mégse")
-            painter.setPen(QPen(c_curve, 1))
-            font_c = QFont()
-            font_c.setPointSize(9)
-            painter.setFont(font_c)
-            painter.drawText(6, self.height() - 8, hint)
 
         # ── Drag & Drop hover kiemelés ───────────────────────────────────────
         if self._drag_hover:
@@ -1262,6 +1271,10 @@ class PointEditorCanvas(QWidget):
                 f"Ejtsd ide!\n({self.title})"
             )
 
+        # ── Alosztály-réteg (pl. GCPCanvas overlay) ──────────────────────────
+        self._paint_overlay(painter)
+        painter.end()
+
 
 # ────────────────────────────────────────────────────────────────────────────
 #  PointEditorWidget
@@ -1270,42 +1283,32 @@ class PointEditorWidget(QWidget):
     """
     Kétpaneles pontszerkesztő (Kép A + Kép B).
 
-    Párosítási logika: anchor_points_a[i] és anchor_points_b[i] egy pár.
-    Dupla kattintáskor a párpont ugyanarra az arányos képpozícióra kerül
-    a másik képen (pl. kép A 30%-os x-pozíciója → kép B 30%-os x-pozíciója).
+    Interakciós modell
+    ------------------
+    Egyszeres klikk  → pontpár lerakása (3-pont affin interpoláció a párhoz)
+    Dupla klikk      → vonallánc rajzolás start/vég
+      közben klikk   → csúcs + azonnali pár a másik képen
+    Vonallánc lezáráskor → felosztás 30 px-enként (A-n), interpolált B-pár
 
-    Billentyűk (canvas fókuszban)
-    -----------------------------
-    Dupla bal klikk       → pont hozzáadása
-    Bal húzás (képen)     → gumiszalag-kijelölés (kék keret)
-    Ctrl+bal húzás        → ROI-keresés indítása (sárga keret)
-    Delete                → kijelölt pont(ok) törlése
-    Space                 → zoom szinkron a másik canvasra
-    Ctrl+0                → zoom visszaállítás
-    Ctrl+görgetés         → pontindex léptetés
-    Görgetés              → zoom
-    Ctrl+Z                → visszavonás
-    Nyílbillentyűk        → pont mozgatása 1 px (Shift = 10 px)
+    Ha a 3-pont interpoláció hibára fut (pl. kollineáris referencia-pontok),
+    hibaablak jelenik meg, az akció törlődik.
 
     Publikus API
     ------------
-    load_images()                 – képek és pontok betöltése
-    refresh_from_project()        – csak a pontlista frissítése
-    undo()                        – visszavonás
-    points_changed (signal)       – bármilyen változás után
-    roi_search_requested (signal) – (x1,y1,x2,y2,side) ROI keresés kérve
+    load_images()             – képek és pontok betöltése
+    refresh_from_project()    – csak a pontlista frissítése
+    undo()                    – visszavonás
+    points_changed (signal)   – bármilyen változás után
     """
 
-    points_changed           = pyqtSignal()
-    # (img_polygon, side, delete_in_roi, backend)  – sokszög-ROI keresés
-    roi_search_requested     = pyqtSignal(list, str, bool, str)
-    # (roi_a_QRectF, roi_b_QRectF, delete_in_roi, backend) – kétoldali ROI keresés
+    points_changed            = pyqtSignal()
+    roi_search_requested      = pyqtSignal(list, str, bool, str)
     dual_roi_search_requested = pyqtSignal(object, object, bool, str)
-    # kép drag & drop jelzések a főablaknak
-    image_a_drop_requested   = pyqtSignal(str)
-    image_b_drop_requested   = pyqtSignal(str)
+    image_a_drop_requested    = pyqtSignal(str)
+    image_b_drop_requested    = pyqtSignal(str)
 
-    _UNDO_LIMIT = 50
+    _UNDO_LIMIT      = 50
+    _POLYLINE_STEP   = 30   # képpont-távolság a vonallánc felosztásánál
 
     _MENU_STYLE = (
         "QMenu{background:#252a33;color:#eee;border:1px solid #444;}"
@@ -1327,13 +1330,16 @@ class PointEditorWidget(QWidget):
         self.project            = project
         self._selected:          int      = -1
         self._selected_set:      Set[int] = set()
-        self._undo_stack:        List[Tuple[List, List]] = []
+        self._undo_stack:        List[Tuple[List, List, List]] = []
         self._roi_last_backend:  str  = "SuperPoint + LightGlue"
         self._roi_delete_in_roi: bool = False
-        # Görbe rajzolás állapot
-        self._draw_mode:         str                      = "point"
-        self._pending_curve_a:   Optional[List]           = None
-        self._pending_curve_b:   Optional[List]           = None
+
+        # Vonallánc rajzolás állapota
+        self._polyline_active:   bool                          = False
+        self._polyline_source:   str                           = ""   # "A" | "B"
+        self._polyline_pts_src:  List[Tuple[float, float]]    = []
+        self._polyline_pts_dst:  List[Tuple[float, float]]    = []
+
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1360,8 +1366,7 @@ class PointEditorWidget(QWidget):
         self.btn_roi_search.setEnabled(False)
         self.btn_roi_search.setFixedHeight(28)
         self.btn_roi_search.setToolTip(
-            tr("Pontkeresés és párosítás csak a megjelölt ROI területeken belül\n"
-            "(mindkét képen kell aktív ROI)"))
+            tr("Pontkeresés és párosítás csak a megjelölt ROI területeken belül"))
         self.btn_roi_search.setStyleSheet(
             "QPushButton{background:#1a4a2e;color:#eee;padding:0 10px;"
             "border-radius:4px;font-size:12px;}"
@@ -1373,7 +1378,6 @@ class PointEditorWidget(QWidget):
         self.btn_roi_clear = QPushButton(tr("⬜  ROI törlése"))
         self.btn_roi_clear.setEnabled(False)
         self.btn_roi_clear.setFixedHeight(28)
-        self.btn_roi_clear.setToolTip(tr("Mindkét canvas ROI-jának törlése"))
         self.btn_roi_clear.setStyleSheet(
             "QPushButton{background:#2e2e2e;color:#aaa;padding:0 10px;"
             "border-radius:4px;font-size:12px;}"
@@ -1383,14 +1387,17 @@ class PointEditorWidget(QWidget):
         self.btn_roi_clear.clicked.connect(self._clear_rois)
 
         self.lbl_hint = QLabel(
-            "2× klikk: pont  |  Húzás: kijelölés  |  "
-            "Ctrl+húzás: ROI keret  |  ROI-n: húzás=mozgat, sarok=átméretez  |  "
-            "Ctrl+klikk: sokszög-ROI  |  Delete: törlés  |  Görgetés: zoom"
+            tr("Klikk: pont  |  2× klikk: vonallánc start/vég  |  "
+               "Húzás: kijelölés  |  Ctrl+húzás: ROI  |  Delete: törlés  |  Görgetés: zoom")
         )
         self.lbl_hint.setStyleSheet("color:#666;font-size:11px;")
 
         self.lbl_count = QLabel(tr("Pontpárok: 0"))
         self.lbl_count.setStyleSheet("color:#aaa;font-size:12px;")
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet(
+            "color:#22ddcc;font-size:12px;font-weight:bold;")
 
         bar.addWidget(self.btn_del)
         bar.addSpacing(4)
@@ -1398,93 +1405,37 @@ class PointEditorWidget(QWidget):
         bar.addWidget(self.btn_roi_clear)
         bar.addSpacing(8)
         bar.addWidget(self.lbl_hint)
+        bar.addSpacing(8)
+        bar.addWidget(self.lbl_status)
         bar.addStretch()
         bar.addWidget(self.lbl_count)
 
         # ── Két canvas ───────────────────────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.canvas_a = PointEditorCanvas("Kép  A")
-        self.canvas_b = PointEditorCanvas("Kép  B")
+        self.canvas_a = PointEditorCanvas(tr("Kép  A"))
+        self.canvas_b = PointEditorCanvas(tr("Kép  B"))
         splitter.addWidget(self.canvas_a)
         splitter.addWidget(self.canvas_b)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
 
-        # ── Görbe rajzolás eszköztár ─────────────────────────────────────────
-        cbar = QHBoxLayout()
-        cbar.setSpacing(6)
-
-        _MODE_BASE = ("QPushButton{padding:0 10px;border-radius:4px;font-size:12px;"
-                      "border:1px solid #444;}"
-                      "QPushButton:checked{border:1px solid #22ddcc;}")
-        _btn_style = lambda col: (
-            f"QPushButton{{background:#1e2430;color:#bbb;padding:0 10px;"
-            f"border-radius:4px;font-size:12px;border:1px solid #444;}}"
-            f"QPushButton:checked{{background:{col};color:#111;border:1px solid {col};}}"
-            f"QPushButton:hover{{background:#2a3040;}}"
-        )
-
-        self.btn_mode_point    = QPushButton(tr("• Pont"))
-        self.btn_mode_polyline = QPushButton(tr("— Vonallánc"))
-        self.btn_mode_arc      = QPushButton(tr("⌒ Ív"))
-        for btn, col in [(self.btn_mode_point, "#aaa"),
-                         (self.btn_mode_polyline, "#22ddcc"),
-                         (self.btn_mode_arc, "#ffaa44")]:
-            btn.setCheckable(True)
-            btn.setFixedHeight(26)
-            btn.setStyleSheet(_btn_style(col))
-        self.btn_mode_point.setChecked(True)
-        self.btn_mode_point.setToolTip(
-            tr("Normál mód: dupla kattintással adj hozzá pontpárokat"))
-        self.btn_mode_polyline.setToolTip(
-            tr("Vonallánc: rajzolj töröttvonalat mindkét képre → "
-               "automatikusan felosztja pontpárokra"))
-        self.btn_mode_arc.setToolTip(
-            tr("Ív: 3 kattintással definiálj körívvet (kezdő, közepe, vég) → "
-               "felosztja pontpárokra"))
-
-        self.btn_mode_point.clicked.connect(
-            lambda: self._set_draw_mode("point"))
-        self.btn_mode_polyline.clicked.connect(
-            lambda: self._set_draw_mode("polyline"))
-        self.btn_mode_arc.clicked.connect(
-            lambda: self._set_draw_mode("arc"))
-
-        lbl_n = QLabel(tr("Pontok/görbe:"))
-        lbl_n.setStyleSheet("color:#888;font-size:12px;")
-        self.spin_subdiv = QSpinBox()
-        self.spin_subdiv.setRange(3, 60)
-        self.spin_subdiv.setValue(10)
-        self.spin_subdiv.setFixedWidth(52)
-        self.spin_subdiv.setFixedHeight(26)
-        self.spin_subdiv.setToolTip(
-            tr("Hány pontpárt hozzon létre egy vonallánc/ív szakaszból"))
-        self.spin_subdiv.setStyleSheet(
-            "QSpinBox{background:#1e2430;color:#ddd;border:1px solid #444;"
-            "border-radius:4px;padding:0 4px;}"
-            "QSpinBox::up-button,QSpinBox::down-button{width:14px;}")
-
-        self.lbl_curve_status = QLabel("")
-        self.lbl_curve_status.setStyleSheet(
-            "color:#22ddcc;font-size:12px;font-weight:bold;")
-
-        cbar.addWidget(self.btn_mode_point)
-        cbar.addWidget(self.btn_mode_polyline)
-        cbar.addWidget(self.btn_mode_arc)
-        cbar.addSpacing(10)
-        cbar.addWidget(lbl_n)
-        cbar.addWidget(self.spin_subdiv)
-        cbar.addSpacing(10)
-        cbar.addWidget(self.lbl_curve_status)
-        cbar.addStretch()
-
         root.addLayout(bar)
-        root.addLayout(cbar)
         root.addWidget(splitter, stretch=1)
 
         # ── Szignálok ────────────────────────────────────────────────────────
-        self.canvas_a.point_added.connect(self._added_a)
-        self.canvas_b.point_added.connect(self._added_b)
+        # Klikk és dupla klikk
+        self.canvas_a.single_click_confirmed.connect(
+            lambda x, y: self._on_single_click("A", x, y))
+        self.canvas_b.single_click_confirmed.connect(
+            lambda x, y: self._on_single_click("B", x, y))
+        self.canvas_a.double_click_confirmed.connect(
+            lambda x, y: self._on_double_click("A", x, y))
+        self.canvas_b.double_click_confirmed.connect(
+            lambda x, y: self._on_double_click("B", x, y))
+        # Esc → vonallánc megszakítása
+        self.canvas_a.escape_pressed.connect(self._cancel_polyline)
+        self.canvas_b.escape_pressed.connect(self._cancel_polyline)
+        # Pont mozgatás / törlés
         self.canvas_a.point_moved.connect(self._moved_a)
         self.canvas_b.point_moved.connect(self._moved_b)
         self.canvas_a.point_deleted.connect(self._delete_pair)
@@ -1497,7 +1448,7 @@ class PointEditorWidget(QWidget):
         # Multi-törlés
         self.canvas_a.points_delete_multi_requested.connect(self._delete_selection)
         self.canvas_b.points_delete_multi_requested.connect(self._delete_selection)
-        # ROI keresés (roi_ready → helyi menü → roi_search_requested)
+        # ROI keresés
         self.canvas_a.roi_ready.connect(
             lambda poly: self._show_roi_menu(poly, "A"))
         self.canvas_b.roi_ready.connect(
@@ -1505,7 +1456,7 @@ class PointEditorWidget(QWidget):
         # Tartós ROI szinkronizálás
         self.canvas_a.roi_rect_changed.connect(self._on_roi_a_changed)
         self.canvas_b.roi_rect_changed.connect(self._on_roi_b_changed)
-        # Kép drag & drop → tovább a főablaknak
+        # Kép drag & drop
         self.canvas_a.image_drop_requested.connect(self.image_a_drop_requested)
         self.canvas_b.image_drop_requested.connect(self.image_b_drop_requested)
         # Zoom szinkron
@@ -1516,9 +1467,15 @@ class PointEditorWidget(QWidget):
         self.canvas_b.middle_clicked.connect(self._on_middle_click)
         self.canvas_a.undo_requested.connect(self._pop_undo)
         self.canvas_b.undo_requested.connect(self._pop_undo)
-        # Görbe kész jelek
-        self.canvas_a.curve_done.connect(self._on_curve_done_a)
-        self.canvas_b.curve_done.connect(self._on_curve_done_b)
+        # Vonallánc csúcs mozgatás / törlés
+        self.canvas_a.polyline_vertex_moved.connect(
+            lambda pidx, vidx, x, y: self._on_poly_vertex_moved("A", pidx, vidx, x, y))
+        self.canvas_b.polyline_vertex_moved.connect(
+            lambda pidx, vidx, x, y: self._on_poly_vertex_moved("B", pidx, vidx, x, y))
+        self.canvas_a.polyline_delete_requested.connect(self._delete_polyline)
+        self.canvas_b.polyline_delete_requested.connect(self._delete_polyline)
+        self.canvas_a.polyline_vertex_delete_requested.connect(self._on_poly_vertex_delete)
+        self.canvas_b.polyline_vertex_delete_requested.connect(self._on_poly_vertex_delete)
 
     # ── Publikus API ─────────────────────────────────────────────────────────
 
@@ -1544,12 +1501,19 @@ class PointEditorWidget(QWidget):
         self.canvas_b.set_points(pts_b)
         self.canvas_a.set_selected(self._selected)
         self.canvas_b.set_selected(self._selected)
-        # Érvénytelen multi-indexek eltávolítása
         n = min(len(pts_a), len(pts_b))
         self._selected_set = {i for i in self._selected_set if i < n}
         self.canvas_a.set_selected_set(list(self._selected_set))
         self.canvas_b.set_selected_set(list(self._selected_set))
         self.lbl_count.setText(tr(f"Pontpárok: {n}"))
+        self._sync_polylines()
+
+    def _sync_polylines(self) -> None:
+        """Tárolt vonalak frissítése mindkét canvas-on."""
+        polys_a = [pl.get("pts_a", []) for pl in self.project.polylines]
+        polys_b = [pl.get("pts_b", []) for pl in self.project.polylines]
+        self.canvas_a.set_polylines(polys_a)
+        self.canvas_b.set_polylines(polys_b)
 
     def _select(self, index: int) -> None:
         self._selected = index
@@ -1559,13 +1523,11 @@ class PointEditorWidget(QWidget):
         self.btn_del.setEnabled(has_sel)
 
     def _on_selection_a(self, indices: List[int]) -> None:
-        """Canvas A gumiszalag → szinkronizálás canvas B-re."""
         self._selected_set = set(indices)
         self.canvas_b.set_selected_set(indices)
         self.btn_del.setEnabled(bool(indices) or self._selected >= 0)
 
     def _on_selection_b(self, indices: List[int]) -> None:
-        """Canvas B gumiszalag → szinkronizálás canvas A-ra."""
         self._selected_set = set(indices)
         self.canvas_a.set_selected_set(indices)
         self.btn_del.setEnabled(bool(indices) or self._selected >= 0)
@@ -1577,6 +1539,7 @@ class PointEditorWidget(QWidget):
         state = (
             copy.deepcopy(self.project.anchor_points_a),
             copy.deepcopy(self.project.anchor_points_b),
+            copy.deepcopy(self.project.polylines),
         )
         self._undo_stack.append(state)
         if len(self._undo_stack) > self._UNDO_LIMIT:
@@ -1585,9 +1548,13 @@ class PointEditorWidget(QWidget):
     def _pop_undo(self) -> bool:
         if not self._undo_stack:
             return False
-        pts_a, pts_b = self._undo_stack.pop()
+        state  = self._undo_stack.pop()
+        pts_a  = state[0]
+        pts_b  = state[1]
+        polys  = state[2] if len(state) > 2 else []
         self.project.anchor_points_a[:] = pts_a
         self.project.anchor_points_b[:] = pts_b
+        self.project.polylines[:]       = polys
         new_sel = min(self._selected, len(pts_a) - 1)
         self._selected_set.clear()
         self._select(new_sel)
@@ -1595,157 +1562,324 @@ class PointEditorWidget(QWidget):
         self.points_changed.emit()
         return True
 
-    # ── Görbe rajzolás logika ────────────────────────────────────────────────
+    # ── Klikk-esemény kezelés ────────────────────────────────────────────────
 
-    def _set_draw_mode(self, mode: str) -> None:
-        """Rajzolási mód váltása: pont / vonallánc / ív."""
-        self._draw_mode      = mode
-        self._pending_curve_a = None
-        self._pending_curve_b = None
-        self.canvas_a.set_draw_mode(mode)
-        self.canvas_b.set_draw_mode(mode)
-        # Gomb állapotok
-        self.btn_mode_point.setChecked(mode == "point")
-        self.btn_mode_polyline.setChecked(mode == "polyline")
-        self.btn_mode_arc.setChecked(mode == "arc")
-        self._update_curve_status()
-
-    def _update_curve_status(self) -> None:
-        """Állapotsor frissítése görbe módban."""
-        if self._draw_mode == "point":
-            self.lbl_curve_status.setText("")
-            return
-        if self._pending_curve_a is None:
-            n = "ív" if self._draw_mode == "arc" else "vonalat"
-            self.lbl_curve_status.setStyleSheet(
-                "color:#22ddcc;font-size:12px;font-weight:bold;")
-            self.lbl_curve_status.setText(
-                tr(f"← Rajzolj {n} az  A  képre"))
-        elif self._pending_curve_b is None:
-            n = "ív" if self._draw_mode == "arc" else "vonalat"
-            self.lbl_curve_status.setStyleSheet(
-                "color:#ffaa44;font-size:12px;font-weight:bold;")
-            self.lbl_curve_status.setText(
-                tr(f"✔ A kész  ·  Most rajzolj {n} a  B  képre"))
+    def _on_single_click(self, side: str, x: float, y: float) -> None:
+        """Egyszeres klikk: pont lerakása VAGY csúcs hozzáadása aktív vonallánchoz."""
+        if self._polyline_active:
+            if side != self._polyline_source:
+                return  # A másik képre kattintás vonallánc közben: figyelmen kívül
+            self._add_polyline_vertex(x, y)
         else:
-            self.lbl_curve_status.setText("")
+            self._add_point_pair(side, x, y)
 
-    def _on_curve_done_a(self, pts: list) -> None:
-        self._pending_curve_a = pts
-        # B oldalt is frissítjük a várakozási jelzéssel
-        self.canvas_b.set_draw_mode(self._draw_mode)
-        self._update_curve_status()
-        if self._pending_curve_b is not None:
-            self._commit_curves()
-
-    def _on_curve_done_b(self, pts: list) -> None:
-        self._pending_curve_b = pts
-        self._update_curve_status()
-        if self._pending_curve_a is not None:
-            self._commit_curves()
-
-    def _commit_curves(self) -> None:
-        """Mindkét görbe kész: felosztja és hozzáadja pontpárként."""
-        n   = self.spin_subdiv.value()
-        pa  = self._pending_curve_a
-        pb  = self._pending_curve_b
-        self._pending_curve_a = None
-        self._pending_curve_b = None
-        self._update_curve_status()
-
-        mode = self._draw_mode
-        if mode == "polyline":
-            pts_a = self._subdivide_polyline(pa, n)
-            pts_b = self._subdivide_polyline(pb, n)
-        elif mode == "arc" and len(pa) >= 3 and len(pb) >= 3:
-            # pa[0]=kezdőpont, pa[1]=végpont, pa[2:]=köztes pontok az ívon
-            mid_a = pa[2 + (len(pa) - 2) // 2]
-            mid_b = pb[2 + (len(pb) - 2) // 2]
-            pts_a = self._subdivide_arc(pa[0], mid_a, pa[1], 12)
-            pts_b = self._subdivide_arc(pb[0], mid_b, pb[1], 12)
+    def _on_double_click(self, side: str, x: float, y: float) -> None:
+        """Dupla klikk: vonallánc indítása (ha nem aktív) vagy lezárása (ha aktív)."""
+        if self._polyline_active:
+            if side != self._polyline_source:
+                return
+            # Lezárás: utolsó csúcs + commit
+            self._add_polyline_vertex(x, y)
+            self._commit_polyline()
         else:
-            return
+            # Ne indítsunk új vonalat, ha meglévő csúcs közelében dupla-klikkelünk
+            if not self._near_poly_vertex(side, x, y):
+                self._start_polyline(side, x, y)
 
-        if not pts_a or not pts_b:
+    def _near_poly_vertex(self, side: str, x: float, y: float,
+                          threshold: float = 20.0) -> bool:
+        """
+        Igaz, ha az (x, y) képkoordináta közelebb van az adott oldal
+        valamely vonallánc-csúcsához, mint `threshold` pixel.
+        """
+        key = "pts_a" if side == "A" else "pts_b"
+        for poly in self.project.polylines:
+            for pt in poly.get(key, []):
+                if math.hypot(x - pt[0], y - pt[1]) <= threshold:
+                    return True
+        return False
+
+    # ── Pontpár lerakása (egyszeres klikk) ──────────────────────────────────
+
+    def _add_point_pair(self, side: str, x: float, y: float) -> None:
+        """
+        Egy pontpár hozzáadása: az egyik kép (x,y) koordinátájára klikkelve
+        a másik kép megfelelő helyzetét 3-pont affin interpolációval számolja.
+        """
+        pts_src = (self.project.anchor_points_a if side == "A"
+                   else self.project.anchor_points_b)
+        pts_dst = (self.project.anchor_points_b if side == "A"
+                   else self.project.anchor_points_a)
+        try:
+            partner = self._interpolate_partner(x, y, pts_src, pts_dst)
+        except ValueError as e:
+            self._show_error(str(e))
             return
 
         self._push_undo()
-        for (ax, ay), (bx, by) in zip(pts_a, pts_b):
-            self.project.anchor_points_a.append([ax, ay])
-            self.project.anchor_points_b.append([bx, by])
+        if side == "A":
+            self.project.anchor_points_a.append([x, y])
+            self.project.anchor_points_b.append(list(partner))
+        else:
+            self.project.anchor_points_b.append([x, y])
+            self.project.anchor_points_a.append(list(partner))
+
+        new_idx = len(self.project.anchor_points_a) - 1
+        self._selected_set.clear()
+        self._select(new_idx)
         self._sync()
         self.points_changed.emit()
 
-    # ── Görbe felosztó segédek ───────────────────────────────────────────────
+    # ── Vonallánc rajzolás ───────────────────────────────────────────────────
+
+    def _start_polyline(self, side: str, x: float, y: float) -> None:
+        """Vonallánc rajzolás indítása – első csúcs lerakása."""
+        pts_src = (self.project.anchor_points_a if side == "A"
+                   else self.project.anchor_points_b)
+        pts_dst = (self.project.anchor_points_b if side == "A"
+                   else self.project.anchor_points_a)
+        try:
+            partner = self._interpolate_partner(x, y, pts_src, pts_dst)
+        except ValueError as e:
+            self._show_error(str(e))
+            return
+
+        self._polyline_active  = True
+        self._polyline_source  = side
+        self._polyline_pts_src = [(x, y)]
+        self._polyline_pts_dst = [partner]
+        self._update_polyline_preview()
+        self.lbl_status.setText(
+            tr(f"Vonallánc  ({side})  |  Klikk: csúcs  |  2× klikk: kész  |  Esc: mégse"))
+
+    def _add_polyline_vertex(self, x: float, y: float) -> None:
+        """Csúcs hozzáadása az aktív vonallánchoz; párja azonnal megjelenik."""
+        side    = self._polyline_source
+        pts_src = (self.project.anchor_points_a if side == "A"
+                   else self.project.anchor_points_b)
+        pts_dst = (self.project.anchor_points_b if side == "A"
+                   else self.project.anchor_points_a)
+        try:
+            partner = self._interpolate_partner(x, y, pts_src, pts_dst)
+        except ValueError as e:
+            self._show_error(str(e))
+            return
+
+        self._polyline_pts_src.append((x, y))
+        self._polyline_pts_dst.append(partner)
+        self._update_polyline_preview()
+
+    def _commit_polyline(self) -> None:
+        """
+        Vonallánc lezárva: eltárolja a csúcsokat polyline objektumként.
+        A felosztás (30 px) csak rendereléskor történik – nem most.
+        """
+        if len(self._polyline_pts_src) < 2:
+            self._cancel_polyline()
+            return
+
+        side = self._polyline_source
+        self._push_undo()
+
+        if side == "A":
+            entry = {
+                "pts_a": [[x, y] for x, y in self._polyline_pts_src],
+                "pts_b": [[x, y] for x, y in self._polyline_pts_dst],
+            }
+        else:
+            entry = {
+                "pts_a": [[x, y] for x, y in self._polyline_pts_dst],
+                "pts_b": [[x, y] for x, y in self._polyline_pts_src],
+            }
+
+        self.project.polylines.append(entry)
+        self._cancel_polyline()   # preview törlése
+        self._sync_polylines()
+        self.points_changed.emit()
+
+    def _cancel_polyline(self) -> None:
+        """Vonallánc megszakítása – minden előnézet törlése."""
+        self._polyline_active  = False
+        self._polyline_source  = ""
+        self._polyline_pts_src = []
+        self._polyline_pts_dst = []
+        self.canvas_a.set_preview_polyline(None)
+        self.canvas_b.set_preview_polyline(None)
+        self.lbl_status.setText("")
+
+    def _update_polyline_preview(self) -> None:
+        """Előnézet frissítése: forrás canvas-on szaggatott vonal, cél canvas-on pontok."""
+        if self._polyline_source == "A":
+            self.canvas_a.set_preview_polyline(
+                self._polyline_pts_src, show_cursor_line=True)
+            self.canvas_b.set_preview_polyline(
+                self._polyline_pts_dst, show_cursor_line=False)
+        else:
+            self.canvas_b.set_preview_polyline(
+                self._polyline_pts_src, show_cursor_line=True)
+            self.canvas_a.set_preview_polyline(
+                self._polyline_pts_dst, show_cursor_line=False)
+
+    # ── Affin interpoláció ────────────────────────────────────────────────────
+
+    _INTERP_CANDIDATES = 8   # hány legközelebbi pontból keresünk jó háromszöget
+    _COND_LIMIT        = 1e10  # ennél nagyobb kondíciószámú háromszög "rossz"
+
+    def _interpolate_partner(self,
+                              x: float, y: float,
+                              src_pts: list, dst_pts: list
+                              ) -> Tuple[float, float]:
+        """
+        A (x, y) forrás-koordináta párját kiszámítja a meglévő pontpárok alapján.
+
+        Algoritmus:
+          1. A K (≤ 8) legközelebbi forráspontból kiválasztja a legjobb
+             kondíciószámú háromszöget (C(K,3) kombináció átvizsgálásával).
+          2. Ha minden háromszög közel kollineáris (cond > 1e10), tartalékként
+             súlyozott legkisebb-négyzetek affin illesztést végez az összes
+             ponton (közelebbi pontok nagyobb súlyt kapnak).
+
+        Kivétel: ValueError – csak akkor, ha n < 3.
+        """
+        from itertools import combinations
+
+        n = len(src_pts)
+        if n < 3:
+            raise ValueError(
+                tr(f"Nincs elég referenciapont az interpolációhoz "
+                   f"({n} db, minimum 3 kell).\n"
+                   "A GCP igazítás után legalább 3 pontpárnak kell lennie."))
+
+        # ── 1. lépés: legjobb háromszög keresése a K legközelebbi pontból ────
+        K = min(self._INTERP_CANDIDATES, n)
+        dists = sorted(
+            (math.hypot(x - float(p[0]), y - float(p[1])), i)
+            for i, p in enumerate(src_pts)
+        )
+        cands = [dists[k][1] for k in range(K)]
+
+        best_cond    = float("inf")
+        best_triplet = None
+
+        for i1, i2, i3 in combinations(cands, 3):
+            p1, p2, p3 = src_pts[i1], src_pts[i2], src_pts[i3]
+            A = np.array([
+                [float(p1[0]), float(p1[1]), 1.0],
+                [float(p2[0]), float(p2[1]), 1.0],
+                [float(p3[0]), float(p3[1]), 1.0],
+            ], dtype=np.float64)
+            cond = np.linalg.cond(A)
+            if cond < best_cond:
+                best_cond    = cond
+                best_triplet = (i1, i2, i3)
+
+        if best_cond <= self._COND_LIMIT and best_triplet is not None:
+            i1, i2, i3 = best_triplet
+            p1, p2, p3 = src_pts[i1], src_pts[i2], src_pts[i3]
+            q1, q2, q3 = dst_pts[i1], dst_pts[i2], dst_pts[i3]
+            A = np.array([
+                [float(p1[0]), float(p1[1]), 1.0],
+                [float(p2[0]), float(p2[1]), 1.0],
+                [float(p3[0]), float(p3[1]), 1.0],
+            ], dtype=np.float64)
+            cu = np.linalg.solve(
+                A, [float(q1[0]), float(q2[0]), float(q3[0])])
+            cv = np.linalg.solve(
+                A, [float(q1[1]), float(q2[1]), float(q3[1])])
+            return (float(cu[0]*x + cu[1]*y + cu[2]),
+                    float(cv[0]*x + cv[1]*y + cv[2]))
+
+        # ── 2. lépés tartalék: súlyozott legkisebb négyzetek ─────────────────
+        return self._interpolate_weighted(x, y, src_pts, dst_pts)
 
     @staticmethod
-    def _subdivide_polyline(pts: list, n: int) -> list:
-        """N egyenközű pontot mintavételez egy töröttvonal mentén (képkoord)."""
-        if n <= 0 or len(pts) < 2:
-            return list(pts)
-        if n == 1:
-            return [pts[0]]
-        # Kumulatív ívhosszak
-        lengths = [0.0]
+    def _interpolate_weighted(x: float, y: float,
+                               src_pts: list, dst_pts: list
+                               ) -> Tuple[float, float]:
+        """
+        Súlyozott legkisebb-négyzetek affin illesztés.
+        Minden meglévő pontpárt felhasznál; a közelebb lévők nagyobb súlyt kapnak.
+        Kollineáris elrendezés esetén is robusztusan működik.
+        """
+        src = np.array([[float(p[0]), float(p[1])] for p in src_pts], dtype=np.float64)
+        dst = np.array([[float(p[0]), float(p[1])] for p in dst_pts], dtype=np.float64)
+
+        # 1 / (távolság + ε) alapú súlyok  →  közelebbi pontok dominálnak
+        dists   = np.sqrt((src[:, 0] - x) ** 2 + (src[:, 1] - y) ** 2)
+        weights = 1.0 / (dists + 1e-6)
+
+        A  = np.column_stack([src, np.ones(len(src))])   # [n × 3]
+        W  = np.diag(weights)
+        WA = W @ A
+
+        cu, *_ = np.linalg.lstsq(WA, W @ dst[:, 0], rcond=None)
+        cv, *_ = np.linalg.lstsq(WA, W @ dst[:, 1], rcond=None)
+
+        return (float(cu[0]*x + cu[1]*y + cu[2]),
+                float(cv[0]*x + cv[1]*y + cv[2]))
+
+    # ── Vonallánc felosztás (30 px-enként a forrás oldalon) ──────────────────
+
+    @staticmethod
+    def _subdivide_by_distance(pts: list, step: float) -> list:
+        """
+        Pontokat mintavételez egy töröttvonal mentén, minden `step` képpont után egyet.
+        Az első pontot mindig tartalmazza; az utolsót is, ha nincs pont közelében.
+        """
+        if len(pts) < 2:
+            return [tuple(pts[0])] if pts else []
+
+        result = [tuple(pts[0])]
+        carry  = 0.0   # az előző szakaszból áthozott töredék-távolság
+
         for i in range(1, len(pts)):
             dx = pts[i][0] - pts[i - 1][0]
             dy = pts[i][1] - pts[i - 1][1]
-            lengths.append(lengths[-1] + math.hypot(dx, dy))
-        total = lengths[-1]
-        if total < 1e-9:
-            return [tuple(pts[0])] * n
-        result = []
-        for k in range(n):
-            t = total * k / (n - 1)
-            for seg in range(1, len(lengths)):
-                if lengths[seg] >= t - 1e-9:
-                    t0, t1 = lengths[seg - 1], lengths[seg]
-                    if t1 - t0 < 1e-9:
-                        result.append(tuple(pts[seg - 1]))
-                    else:
-                        alpha = (t - t0) / (t1 - t0)
-                        x = pts[seg-1][0] + alpha * (pts[seg][0] - pts[seg-1][0])
-                        y = pts[seg-1][1] + alpha * (pts[seg][1] - pts[seg-1][1])
-                        result.append((x, y))
-                    break
-            else:
-                result.append(tuple(pts[-1]))
+            seg_len = math.hypot(dx, dy)
+            if seg_len < 1e-9:
+                continue
+
+            # Első mintavételi pont a szakaszon belül (step - carry távolságra az elejétől)
+            dist_in_seg = step - carry
+            while dist_in_seg <= seg_len + 1e-9:
+                t = min(1.0, dist_in_seg / seg_len)
+                result.append((
+                    pts[i - 1][0] + t * dx,
+                    pts[i - 1][1] + t * dy,
+                ))
+                dist_in_seg += step
+
+            # Maradék távolság (a következő szakaszra viszi át)
+            carry = seg_len - (dist_in_seg - step)
+
+        # Utolsó pont hozzáadása, ha nincs közel
+        last = result[-1]
+        end  = pts[-1]
+        if math.hypot(last[0] - end[0], last[1] - end[1]) > 1.0:
+            result.append(tuple(end))
+
         return result
 
-    @staticmethod
-    def _subdivide_arc(p0, p1, p2, n: int) -> list:
-        """N egyenközű pontot mintavételez a P0-P1-P2 körívven (P1 az ívon van)."""
-        if n <= 0:
-            return []
-        if n == 1:
-            return [tuple(p0)]
-        ax, ay = p0;  bx, by = p1;  cx, cy = p2
-        D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-        if abs(D) < 1e-10:
-            # Kollineáris → egyenes vonal
-            return PointEditorWidget._subdivide_polyline([p0, p2], n)
-        ux = ((ax**2+ay**2)*(by-cy) + (bx**2+by**2)*(cy-ay) + (cx**2+cy**2)*(ay-by)) / D
-        uy = ((ax**2+ay**2)*(cx-bx) + (bx**2+by**2)*(ax-cx) + (cx**2+cy**2)*(bx-ax)) / D
-        r  = math.hypot(ax - ux, ay - uy)
-        a_start = math.atan2(ay - uy, ax - ux)
-        a_mid   = math.atan2(by - uy, bx - ux)
-        a_end   = math.atan2(cy - uy, cx - ux)
-        # Iránymeghatározás: az ív P1-en megy keresztül
-        m_ccw = (a_mid - a_start) % (2 * math.pi)
-        e_ccw = (a_end - a_start) % (2 * math.pi)
-        if e_ccw == 0:
-            e_ccw = 2 * math.pi
-        if m_ccw <= e_ccw:          # CCW
-            angles = [a_start + e_ccw * k / (n - 1) for k in range(n)]
-        else:                        # CW
-            sweep = (2 * math.pi - e_ccw) % (2 * math.pi) or 2 * math.pi
-            angles = [a_start - sweep * k / (n - 1) for k in range(n)]
-        return [(ux + r * math.cos(a), uy + r * math.sin(a)) for a in angles]
+    # ── Hibajelzés ──────────────────────────────────────────────────────────
+
+    def _show_error(self, message: str) -> None:
+        """Hibaablak megjelenítése (OK gombbal)."""
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(tr("ArchMorph – Hiba"))
+        dlg.setText(message)
+        dlg.setIcon(QMessageBox.Icon.Warning)
+        dlg.setStyleSheet(
+            "QMessageBox{background:#1e2430;color:#eee;}"
+            "QLabel{color:#eee;font-size:13px;}"
+            "QPushButton{background:#2a3040;color:#eee;padding:4px 20px;"
+            "border-radius:4px;border:1px solid #444;}"
+            "QPushButton:hover{background:#3a4050;}"
+        )
+        dlg.exec()
 
     # ── Tartós téglalap-ROI kezelés ──────────────────────────────────────────
 
     def _on_roi_a_changed(self, roi_img) -> None:
-        """A kép ROI-ja változott → arányos ROI megjelenítése B képen."""
         self._update_roi_buttons()
         if roi_img is None:
             return
@@ -1755,18 +1889,15 @@ class PointEditorWidget(QWidget):
             return
         ha, wa = img_a.shape[:2]
         hb, wb = img_b.shape[:2]
-        # Arányos átméretezés A → B képkoord-rendszerbe
         ax = roi_img.left()  / wa;  ay = roi_img.top()    / ha
         aw = roi_img.width() / wa;  ah = roi_img.height() / ha
         b_rect = QRectF(ax * wb, ay * hb, aw * wb, ah * hb)
-        # Canvas B szinkronizálása (szignál kikapcsolva körkörös hívás ellen)
         self.canvas_b.roi_rect_changed.disconnect(self._on_roi_b_changed)
         self.canvas_b.set_roi_from_image(b_rect)
         self.canvas_b.roi_rect_changed.connect(self._on_roi_b_changed)
         self._update_roi_buttons()
 
     def _on_roi_b_changed(self, roi_img) -> None:
-        """B kép ROI-ja változott (felhasználó módosította)."""
         self._update_roi_buttons()
 
     def _update_roi_buttons(self) -> None:
@@ -1781,16 +1912,12 @@ class PointEditorWidget(QWidget):
         self._update_roi_buttons()
 
     def _on_dual_roi_search(self) -> None:
-        """ROI keresés indítása – backend választó menüvel."""
         roi_a = self.canvas_a.get_roi_image()
         roi_b = self.canvas_b.get_roi_image()
         if roi_a is None or roi_b is None:
             return
-
-        # Backend választó + delete_in_roi – ugyanolyan menüstílussal
         menu = QMenu(self)
         menu.setStyleSheet(self._MENU_STYLE)
-
         sub = menu.addMenu("Backend")
         ag  = QActionGroup(sub)
         ag.setExclusive(True)
@@ -1799,52 +1926,35 @@ class PointEditorWidget(QWidget):
             act.setChecked(be == self._roi_last_backend)
             ag.addAction(act)
             sub.addAction(act)
-
         act_del = QAction(tr("ROI-n belüli meglévő párokat törölje előbb"), menu,
                           checkable=True)
         act_del.setChecked(self._roi_delete_in_roi)
         menu.addAction(act_del)
         menu.addSeparator()
-        act_go  = QAction(tr("🔍  Keresés indítása"), menu)
+        act_go = QAction(tr("🔍  Keresés indítása"), menu)
         menu.addAction(act_go)
-
         chosen = menu.exec(self.btn_roi_search.mapToGlobal(
             self.btn_roi_search.rect().bottomLeft()))
         if chosen is None or chosen is not act_go:
             return
-
-        # Frissítjük az állapotot
         for act in ag.actions():
             if act.isChecked():
                 self._roi_last_backend = act.text()
                 break
         self._roi_delete_in_roi = act_del.isChecked()
-
         self.dual_roi_search_requested.emit(
-            roi_a, roi_b,
-            self._roi_delete_in_roi,
-            self._roi_last_backend,
-        )
+            roi_a, roi_b, self._roi_delete_in_roi, self._roi_last_backend)
 
     # ── ROI helyi menü ───────────────────────────────────────────────────────
 
     def _show_roi_menu(self, widget_poly: list, side: str) -> None:
-        """
-        Megjelenik a ROI-keresés helyi menüje.
-
-        widget_poly : a sokszög csúcsai widget-koordinátában
-        side        : "A" vagy "B" – melyik canvason rajzolták
-        """
         canvas = self.canvas_a if side == "A" else self.canvas_b
-
-        # Widget → kép koordináta konverzió
         img_poly = []
         for wx, wy in widget_poly:
             ic = canvas._w2i(wx, wy)
             if ic is not None:
                 img_poly.append([float(ic[0]), float(ic[1])])
             else:
-                # Képen kívüli csúcs: a kép szélére klampoljuk
                 rect = canvas._display_rect()
                 iw, ih = (canvas._img_size or (1, 1))
                 if rect:
@@ -1853,29 +1963,20 @@ class PointEditorWidget(QWidget):
                     rx = (cx - rect.left()) / rect.width()
                     ry = (cy - rect.top())  / rect.height()
                     img_poly.append([rx * iw, ry * ih])
-
         if len(img_poly) < 3:
             canvas._display_poly = []
             canvas.update()
             return
-
-        # Sokszög megjelenítése amíg a menü nyitva van
         canvas._display_poly = list(widget_poly)
         canvas.update()
-
-        # ── Menü felépítése ───────────────────────────────────────────────────
         menu = QMenu(canvas)
         menu.setStyleSheet(self._MENU_STYLE)
-
-        # Cím (nem kattintható)
         n_verts    = len(img_poly)
         shape_name = "téglalap-ROI" if n_verts == 4 else f"{n_verts}-szög ROI"
         title_act  = QAction(tr(f"  {shape_name}  –  keresési beállítások"), menu)
         title_act.setEnabled(False)
         menu.addAction(title_act)
         menu.addSeparator()
-
-        # Backend almenü
         bk_menu  = menu.addMenu("▸  Backend: " + self._roi_last_backend)
         bk_menu.setStyleSheet(self._MENU_STYLE)
         bk_group = QActionGroup(bk_menu)
@@ -1888,47 +1989,29 @@ class PointEditorWidget(QWidget):
             bk_group.addAction(act)
             bk_menu.addAction(act)
             bk_acts[act] = b
-
         menu.addSeparator()
-
-        # Meglévő pontok törlése ROI-ban (be/ki kapcsolható)
         del_act = QAction(tr("Meglévő pontok törlése a területen belül"), menu)
         del_act.setCheckable(True)
         del_act.setChecked(self._roi_delete_in_roi)
-        del_act.setToolTip(
-            tr("Ha be van jelölve, keresés előtt törli az összes meglévő\n"
-            "pontpárt amelyek bármelyik tagja a berajzolt területen belül esik."))
         menu.addAction(del_act)
         menu.addSeparator()
-
-        # Keresés gomb
-        search_act = QAction(tr(f"▶  ROI keresés indítása"), menu)
+        search_act = QAction(tr("▶  ROI keresés indítása"), menu)
         menu.addAction(search_act)
-
         cancel_act = QAction(tr("✕  Mégse"), menu)
         menu.addAction(cancel_act)
-
-        # ── Menü megjelenítése ────────────────────────────────────────────────
         last_wx, last_wy = widget_poly[-1]
         global_pos = canvas.mapToGlobal(QPoint(int(last_wx), int(last_wy)))
         chosen     = menu.exec(global_pos)
-
-        # Backend-csere: frissítjük az állapotot, majd újra megjelenítjük a menüt
         if chosen in bk_acts:
             self._roi_last_backend = bk_acts[chosen]
-            self._show_roi_menu(widget_poly, side)  # rekurzív újranyitás
+            self._show_roi_menu(widget_poly, side)
             return
-
-        # Delete toggle: frissítjük az állapotot, majd újra megjelenítjük
         if chosen == del_act:
             self._roi_delete_in_roi = del_act.isChecked()
             self._show_roi_menu(widget_poly, side)
             return
-
-        # Menü bezárása (bármelyik ágon): display_poly törlése
         canvas._display_poly = []
         canvas.update()
-
         if chosen == search_act:
             self._roi_delete_in_roi = del_act.isChecked()
             self.roi_search_requested.emit(
@@ -1939,104 +2022,121 @@ class PointEditorWidget(QWidget):
         self.canvas_b._reset_zoom()
         self._pop_undo()
 
-    # ── Pont hozzáadása ──────────────────────────────────────────────────────
+    # ── Vonallánc csúcs mozgatás / törlés ────────────────────────────────────
 
-    def _added_a(self, x: float, y: float) -> None:
-        self._push_undo()
-        self.project.anchor_points_a.append([x, y])
-        bx, by = self._mirror_a_to_b(x, y)
-        self.project.anchor_points_b.append([bx, by])
-        self._selected_set.clear()
-        self._select(len(self.project.anchor_points_a) - 1)
-        self._sync()
-        self.points_changed.emit()
+    def _on_poly_vertex_moved(self, side: str,
+                               pidx: int, vidx: int,
+                               x: float, y: float) -> None:
+        """Vonallánc csúcs mozgatva – projekt frissítése (canvas már friss)."""
+        if 0 <= pidx < len(self.project.polylines):
+            key  = "pts_a" if side == "A" else "pts_b"
+            poly = self.project.polylines[pidx]
+            pts  = poly.get(key, [])
+            if 0 <= vidx < len(pts):
+                pts[vidx] = [x, y]
+            self.points_changed.emit()
 
-    def _added_b(self, x: float, y: float) -> None:
-        self._push_undo()
-        self.project.anchor_points_b.append([x, y])
-        ax, ay = self._mirror_b_to_a(x, y)
-        self.project.anchor_points_a.append([ax, ay])
-        self._selected_set.clear()
-        self._select(len(self.project.anchor_points_b) - 1)
-        self._sync()
-        self.points_changed.emit()
+    def _delete_polyline(self, pidx: int) -> None:
+        """Vonallánc törlése (Ctrl+jobb klikk)."""
+        if 0 <= pidx < len(self.project.polylines):
+            self._push_undo()
+            self.project.polylines.pop(pidx)
+            self._sync_polylines()
+            self.points_changed.emit()
 
-    def _mirror_a_to_b(self, x: float, y: float) -> Tuple[float, float]:
+    def _on_poly_vertex_delete(self, pidx: int, vidx: int) -> None:
         """
-        A kép (x, y) koordinátájából becsüli a B kép megfelelő helyzetét.
-
-        Prioritás:
-          1. Ha a képek már azonos méretűek (GCP warp után) → identitás (x, y)
-          2. Ha van eltárolt homográfia (auto-illesztésből) → H * pont
-          3. Fallback: arányos átskálázás a képméretek alapján
+        Egy csúcs törlése a vonalláncból (sima jobb klikk csúcson).
+        Ha a törlés után kevesebb mint 2 csúcs marad, az egész vonallánc törlődik.
         """
-        ia, ib = self.project.image_a, self.project.image_b
-        if ia is None or ib is None:
-            return x, y
-        ha, wa = ia.shape[:2]
-        hb, wb = ib.shape[:2]
+        if 0 <= pidx < len(self.project.polylines):
+            poly  = self.project.polylines[pidx]
+            pts_a = poly.get("pts_a", [])
+            pts_b = poly.get("pts_b", [])
+            n     = min(len(pts_a), len(pts_b))
+            if 0 <= vidx < n:
+                self._push_undo()
+                pts_a.pop(vidx)
+                pts_b.pop(vidx)
+                # Ha 1 csúcs vagy kevesebb maradt → egész vonallánc törlése
+                if min(len(pts_a), len(pts_b)) < 2:
+                    self.project.polylines.pop(pidx)
+                self._sync_polylines()
+                self.points_changed.emit()
 
-        # 1. Azonos méret → már igazított képek, identitás elég
-        if wa == wb and ha == hb:
-            return float(x), float(y)
+    # ── Renderelési segéd: vonalak → pontpárok ───────────────────────────────
 
-        # 2. Van homográfia → perspektív transzformáció
-        H_list = self.project.homography_matrix
-        if H_list is not None:
-            try:
-                import numpy as _np
-                H = _np.array(H_list, dtype=_np.float64)
-                ph = H @ _np.array([x, y, 1.0])
-                if abs(ph[2]) > 1e-10:
-                    rx = float(ph[0] / ph[2])
-                    ry = float(ph[1] / ph[2])
-                    rx = max(0.0, min(rx, float(wb)))
-                    ry = max(0.0, min(ry, float(hb)))
-                    return rx, ry
-            except Exception:
-                pass
-
-        # 3. Fallback: arányos átskálázás
-        return (x / wa) * wb, (y / ha) * hb
-
-    def _mirror_b_to_a(self, x: float, y: float) -> Tuple[float, float]:
+    @staticmethod
+    def polylines_to_point_pairs(polylines: list,
+                                  step: float = 30.0,
+                                  ) -> Tuple[List[List[float]], List[List[float]]]:
         """
-        B kép (x, y) koordinátájából becsüli az A kép megfelelő helyzetét.
+        Rendereléskor hívandó: minden tárolt vonallánc felosztása pontpárokká.
 
-        Prioritás:
-          1. Azonos méretű képek (GCP warp után) → identitás
-          2. Van homográfia → H⁻¹ * pont
-          3. Fallback: arányos átskálázás
+        Algoritmus:
+          1. A-oldali vonalat `step` px-enként osztja → N pontot kap
+          2. B-oldali vonalat pontosan N pontra mintavételezi (egyenletesen)
+          3. Visszaadja az összes pontpárt
+
+        Visszatér: (pts_a_all, pts_b_all)
         """
-        ia, ib = self.project.image_a, self.project.image_b
-        if ia is None or ib is None:
-            return x, y
-        ha, wa = ia.shape[:2]
-        hb, wb = ib.shape[:2]
+        pts_a_all: List[List[float]] = []
+        pts_b_all: List[List[float]] = []
 
-        # 1. Azonos méret → identitás
-        if wa == wb and ha == hb:
-            return float(x), float(y)
+        for poly in polylines:
+            src = poly.get("pts_a", [])
+            dst = poly.get("pts_b", [])
+            if len(src) < 2 or len(dst) < 2:
+                continue
+            sub_a = PointEditorWidget._subdivide_by_distance(src, step)
+            n = len(sub_a)
+            if n < 2:
+                continue
+            sub_b = PointEditorWidget._resample_to_n(dst, n)
+            pts_a_all.extend([[pt[0], pt[1]] for pt in sub_a])
+            pts_b_all.extend([[pt[0], pt[1]] for pt in sub_b])
 
-        # 2. Van homográfia → H inverze
-        H_list = self.project.homography_matrix
-        if H_list is not None:
-            try:
-                import numpy as _np
-                H    = _np.array(H_list, dtype=_np.float64)
-                Hinv = _np.linalg.inv(H)
-                ph   = Hinv @ _np.array([x, y, 1.0])
-                if abs(ph[2]) > 1e-10:
-                    rx = float(ph[0] / ph[2])
-                    ry = float(ph[1] / ph[2])
-                    rx = max(0.0, min(rx, float(wa)))
-                    ry = max(0.0, min(ry, float(ha)))
-                    return rx, ry
-            except Exception:
-                pass
+        return pts_a_all, pts_b_all
 
-        # 3. Fallback: arányos átskálázás
-        return (x / wb) * wa, (y / hb) * ha
+    @staticmethod
+    def _resample_to_n(pts: list, n: int) -> list:
+        """
+        Töröttvonalat pontosan `n` pontra mintavételez (egyenletesen hossz szerint).
+        Az első és az utolsó pont mindig szerepel.
+        """
+        if n <= 1:
+            return [tuple(pts[0])]
+
+        # Kumulatív hossz
+        lengths = [0.0]
+        for i in range(1, len(pts)):
+            d = math.hypot(
+                float(pts[i][0]) - float(pts[i - 1][0]),
+                float(pts[i][1]) - float(pts[i - 1][1]),
+            )
+            lengths.append(lengths[-1] + d)
+
+        total = lengths[-1]
+        if total < 1e-9:
+            return [tuple(pts[0])] * n
+
+        result = []
+        for k in range(n):
+            target = total * k / (n - 1)
+            # Szakasz keresése
+            for i in range(1, len(lengths)):
+                if lengths[i] >= target - 1e-9 or i == len(lengths) - 1:
+                    seg_len = lengths[i] - lengths[i - 1]
+                    if seg_len < 1e-9:
+                        result.append((float(pts[i][0]), float(pts[i][1])))
+                    else:
+                        t = min(1.0, max(0.0, (target - lengths[i - 1]) / seg_len))
+                        x = float(pts[i - 1][0]) + t * (float(pts[i][0]) - float(pts[i - 1][0]))
+                        y = float(pts[i - 1][1]) + t * (float(pts[i][1]) - float(pts[i - 1][1]))
+                        result.append((x, y))
+                    break
+
+        return result
 
     # ── Pont mozgatása ───────────────────────────────────────────────────────
 
@@ -2053,7 +2153,6 @@ class PointEditorWidget(QWidget):
     # ── Pont törlése ─────────────────────────────────────────────────────────
 
     def _delete_pair(self, index: int) -> None:
-        """Egyszeres törlés (jobb klikk menü vagy Delete egyszeres kijelöléssel)."""
         self._push_undo()
         pa = self.project.anchor_points_a
         pb = self.project.anchor_points_b
@@ -2070,15 +2169,10 @@ class PointEditorWidget(QWidget):
         self.points_changed.emit()
 
     def _delete_selection(self) -> None:
-        """
-        Multi-törlés: ha van multi-kijelölés, azokat törli.
-        Ha nincs, az egyszeresen kijelöltet törli.
-        """
         if self._selected_set:
             self._push_undo()
             pa = self.project.anchor_points_a
             pb = self.project.anchor_points_b
-            # Csökkenő indexsorrendben töröl, hogy az indexek ne csússzanak el
             for idx in sorted(self._selected_set, reverse=True):
                 if 0 <= idx < len(pa):
                     pa.pop(idx)

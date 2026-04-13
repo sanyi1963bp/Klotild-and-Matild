@@ -71,17 +71,16 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDockWidget, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QFrame, QGroupBox, QInputDialog, QLabel,
-    QLineEdit, QListWidget,
+    QFileDialog, QFormLayout, QFrame, QGroupBox, QLabel, QLineEdit,
+    QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressDialog,
     QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QSpinBox,
     QStackedWidget, QStatusBar, QTabWidget, QTextEdit, QToolBar,
-    QToolButton, QVBoxLayout, QHBoxLayout, QWidget,
+    QVBoxLayout, QHBoxLayout, QWidget,
 )
 
 # Saját modulok
-from point_editor  import PointEditorWidget
-from theme_editor  import ThemeEditor
+from point_editor import PointEditorWidget
 try:
     from archmorph_config_loader import cfg
 except ImportError:
@@ -1419,13 +1418,9 @@ class AutomaticModeTab(QWidget):
         root = QVBoxLayout(self)
         root.setSpacing(8)
 
-        # ════════════════════════════════════════════════════════════════════
-        # 1. ALGORITMUS + RANSAC – szorosan összetartoznak:
-        #    a RANSAC az illesztési folyamat geometriai szűrő lépése
-        # ════════════════════════════════════════════════════════════════════
-        algo_box  = QGroupBox(tr("Algoritmus és geometriai szűrés"))
-        algo_form = QFormLayout(algo_box)
-        algo_form.setSpacing(6)
+        # ── Backend választó ──────────────────────────────────────────────
+        backend_box  = QGroupBox(tr("Illesztési algoritmus (backend)"))
+        backend_form = QFormLayout(backend_box)
 
         self.matcher_combo = QComboBox()
         self.matcher_combo.addItems([
@@ -1444,38 +1439,10 @@ class AutomaticModeTab(QWidget):
             "  Detektor nélküli; textúraszegény vagy erősen deformált képeken.\n\n"
             "SIFT (OpenCV):\n"
             "  Klasszikus, CPU-n fut, mindig elérhető; megbízható fallback.")
-        algo_form.addRow(tr("Backend:"), self.matcher_combo)
+        backend_form.addRow("Backend:", self.matcher_combo)
+        root.addWidget(backend_box)
 
-        # Elválasztó vonal a RANSAC blokk előtt
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#3a4a5a;")
-        algo_form.addRow(sep)
-
-        self.ransac_chk = QCheckBox(tr("RANSAC geometriai szűrés"))
-        self.ransac_chk.setChecked(True)
-        self.ransac_chk.setToolTip(
-            "RANSAC szűrés: automatikusan kizárja a geometriailag\n"
-            "hibás pontpárokat (outliereket) a homográfia illesztés alapján.\n"
-            "Erősen ajánlott, különösen sok pont és eltérő perspektíva esetén.")
-        algo_form.addRow(self.ransac_chk)
-
-        self.ransac_reproj = QDoubleSpinBox()
-        self.ransac_reproj.setRange(0.5, 20.0)
-        self.ransac_reproj.setSingleStep(0.5)
-        self.ransac_reproj.setDecimals(1)
-        self.ransac_reproj.setValue(cfg("match.ransac.reproj_threshold", 3.0))
-        self._add_row(algo_form, tr("  Reproj. küszöb (px):"), self.ransac_reproj,
-            "Visszavetítési küszöb pixelben.\n"
-            "Kisebb → szigorúbb szűrés (kevesebb, de pontosabb egyezés).\n"
-            "Nagyobb → engedékenyebb (több pont marad).\n"
-            "Ajánlott: 2.0–5.0. Pixelszintű pontossághoz: 1.0–2.0.")
-
-        root.addWidget(algo_box)
-
-        # ════════════════════════════════════════════════════════════════════
-        # 2. BACKEND PARAMÉTEREK – a kiválasztott algoritmustól függő beállítások
-        # ════════════════════════════════════════════════════════════════════
+        # ── Per-backend paraméter-panelek ─────────────────────────────────
         params_box  = QGroupBox(tr("Backend paraméterek"))
         params_vbox = QVBoxLayout(params_box)
 
@@ -1488,26 +1455,13 @@ class AutomaticModeTab(QWidget):
         params_vbox.addWidget(self._stack)
         root.addWidget(params_box)
 
-        # ════════════════════════════════════════════════════════════════════
-        # 3. HALADÓ BEÁLLÍTÁSOK – debug / speciális eset (CPU kényszerítés)
-        # ════════════════════════════════════════════════════════════════════
-        adv_box  = QGroupBox(tr("Haladó beállítások"))
-        adv_vbox = QVBoxLayout(adv_box)
-        adv_vbox.setContentsMargins(8, 4, 8, 4)
+        # ── Közös beállítások (RANSAC + CPU) ──────────────────────────────
+        common_box  = QGroupBox(tr("Közös beállítások"))
+        common_vbox = QVBoxLayout(common_box)
+        common_vbox.addWidget(self._panel_common())
+        root.addWidget(common_box)
 
-        self.cpu_chk = QCheckBox(tr("CPU kényszerítése  (GPU nélküli futtatás)"))
-        self.cpu_chk.setChecked(False)
-        self.cpu_chk.setToolTip(
-            "Ha be van jelölve, az algoritmus GPU helyett CPU-n fut.\n"
-            "Hasznos ha nincs kompatibilis GPU, vagy CUDA-hiba esetén.\n"
-            "CUDA nélküli rendszeren automatikusan CPU-t használ –\n"
-            "ilyenkor ezt nem szükséges bejelölni.")
-        adv_vbox.addWidget(self.cpu_chk)
-        root.addWidget(adv_box)
-
-        # ════════════════════════════════════════════════════════════════════
-        # 4. INDÍTÁS GOMB – legalsó, mindig látható
-        # ════════════════════════════════════════════════════════════════════
+        # ── Indítás gomb ──────────────────────────────────────────────────
         btn = QPushButton("▶  Automatikus illesztés indítása")
         btn.setStyleSheet(
             "QPushButton{background:#2e7d32;color:#eee;font-weight:bold;"
@@ -1518,7 +1472,7 @@ class AutomaticModeTab(QWidget):
             "Elindítja az automatikus pontillesztést a kiválasztott backend\n"
             "és a fenti paraméterek alapján.\n"
             "A meglévő kézzel szerkesztett pontok felülíródnak!\n"
-            "(Szerkesztés → Visszavonás menüvel visszaállítható.)")
+            "(Az Szerkesztés → Visszavonás menüvel visszaállítható.)")
         btn.clicked.connect(self.request_auto_match.emit)
         root.addWidget(btn)
         root.addStretch()
@@ -1640,42 +1594,9 @@ class AdvancedEditorTab(QWidget):
         # ── Egyezések áttekintője (összesen) ─────────────────────────────
         self.match_overview = MatchOverviewCanvas()
 
-        # ── Splitter: mindkét panel fejléces konténerbe csomagolva ───────
-        def _labeled_panel(title: str, widget: QWidget,
-                           tooltip: str = "") -> QWidget:
-            """Fejléccel ellátott konténer a splitter-résekhez."""
-            container = QWidget()
-            vbox = QVBoxLayout(container)
-            vbox.setContentsMargins(0, 0, 0, 0)
-            vbox.setSpacing(0)
-            hdr = QLabel(f"  {title}")
-            hdr.setFixedHeight(22)
-            hdr.setStyleSheet(
-                "background:#1e2730; color:#7ab; font-size:11px;"
-                "font-weight:bold; border-bottom:1px solid #2e3c4a;"
-            )
-            if tooltip:
-                hdr.setToolTip(tooltip)
-            vbox.addWidget(hdr)
-            vbox.addWidget(widget, stretch=1)
-            return container
-
-        editor_panel = _labeled_panel(
-            tr("✏️  Pontszerkesztő  –  kézzel elhelyezett morfpontpárok"),
-            self.point_editor,
-            tr("Bal képre / jobb képre kattintva helyezz el egyező pontpárokat.\n"
-               "Ezek vezérlik a morfozást. Jobb klikk: törlés. Ctrl+Z: visszavonás.")
-        )
-        overview_panel = _labeled_panel(
-            tr("🔍  Illesztési áttekintő  –  összes automatikus egyezés"),
-            self.match_overview,
-            tr("Az automata illesztés (SuperPoint / SIFT / stb.) által talált\n"
-               "összes pontpár: zöld = inlier (RANSAC), piros = outlier.")
-        )
-
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(editor_panel)
-        splitter.addWidget(overview_panel)
+        splitter.addWidget(self.point_editor)
+        splitter.addWidget(self.match_overview)
         splitter.setSizes([500, 200])
 
         root.addWidget(splitter)
@@ -1861,10 +1782,14 @@ class ExportTab(QWidget):
         slider_row.addWidget(self._lbl_frame)
         root.addLayout(slider_row)
 
-        # ── Lejátszó + Generálás – ugyanazon sorban, mert szorosan összetartoznak ──
-        # Workflow: generál → csúszka / lejátszás → exportál
+        # ── Lejátszó gombok ──────────────────────────────────────────────────
         play_row = QHBoxLayout()
         play_row.setSpacing(6)
+
+        self._btn_play = QPushButton("▶  Lejátszás")
+        self._btn_play.setCheckable(True)
+        self._btn_play.toggled.connect(self._on_play_toggle)
+        self._btn_play.setFixedHeight(30)
 
         self._btn_prev = QPushButton("◀")
         self._btn_prev.setFixedWidth(36)
@@ -1876,41 +1801,10 @@ class ExportTab(QWidget):
         self._btn_next.setFixedHeight(30)
         self._btn_next.clicked.connect(lambda: self._step(1))
 
-        self._btn_play = QPushButton("▶  Lejátszás")
-        self._btn_play.setCheckable(True)
-        self._btn_play.toggled.connect(self._on_play_toggle)
-        self._btn_play.setFixedHeight(30)
-
         play_row.addWidget(self._btn_prev)
         play_row.addWidget(self._btn_next)
         play_row.addSpacing(8)
         play_row.addWidget(self._btn_play)
-
-        # Elválasztó a lejátszó és a generálás között
-        play_sep = QFrame()
-        play_sep.setFrameShape(QFrame.Shape.VLine)
-        play_sep.setStyleSheet("color:#3a4a5a;")
-        play_row.addSpacing(8)
-        play_row.addWidget(play_sep)
-        play_row.addSpacing(8)
-
-        # Generálás gomb + stale warning – a lejátszó mellé kerül
-        self._btn_generate = QPushButton("⚙  Képkockák generálása")
-        self._btn_generate.setToolTip(
-            "Előnézeti képkockák előállítása a kiválasztott módszerrel.\n"
-            "Ezután a lejátszó és az export gombok aktívvá válnak.")
-        self._btn_generate.clicked.connect(self._generate)
-        self._btn_generate.setFixedHeight(30)
-
-        self._lbl_stale = QLabel("")
-        self._lbl_stale.setStyleSheet(
-            "color:#e8a020; font-size:11px; font-weight:bold;")
-        self._lbl_stale.setToolTip(
-            "A beállítások megváltoztak – generáld újra a képkockákat!")
-
-        play_row.addWidget(self._btn_generate)
-        play_row.addSpacing(6)
-        play_row.addWidget(self._lbl_stale)
         play_row.addStretch()
 
         root.addLayout(play_row)
@@ -1940,15 +1834,13 @@ class ExportTab(QWidget):
         self._spin_fps.setRange(1.0, 60.0)
         self._spin_fps.setValue(cfg("export.defaults.fps", 25.0))
         self._spin_fps.setSingleStep(1.0)
-        self._spin_fps.setToolTip(
-            "Export FPS – a kimentett MP4/GIF lejátszási sebessége.\n"
-            "Az előnézeti csúszkát és lejátszást NEM befolyásolja.\n"
-            "Újragenerálás sem szükséges FPS-változás után.")
+        self._spin_fps.setToolTip("Lejátszási sebesség (képkocka/másodperc)")
         # FPS szándékosan nincs _mark_stale-hez kötve:
-        # csak exportidőzítést befolyásol, a képkockák tartalmát nem.
+        # az FPS csak lejátszási sebességet / exportidőzítést befolyásol,
+        # a képkockák tartalmát nem érinti.
 
-        fl.addRow(tr("Képkockák:"),  self._spin_frames)
-        fl.addRow(tr("Export FPS:"), self._spin_fps)
+        fl.addRow("Darab:", self._spin_frames)
+        fl.addRow("FPS:",   self._spin_fps)
         cfg_row.addWidget(grp_frames)
 
         # ── Módszer + per-módszer beállítások (QStackedWidget) ────────────────
@@ -2047,6 +1939,25 @@ class ExportTab(QWidget):
         el.addRow("Easing:", self._combo_ease)
         el.addRow("",        self._chk_pingpong)
         cfg_row.addWidget(grp_ease)
+
+        # ── Generálás gomb ────────────────────────────────────────────────────
+        grp_gen = QGroupBox(tr("Generálás"))
+        gl = QVBoxLayout(grp_gen)
+        gl.setContentsMargins(8, 12, 8, 8)
+        self._btn_generate = QPushButton("⚙  Képkockák generálása")
+        self._btn_generate.setToolTip(
+            "Előnézeti képkockák előállítása a kiválasztott módszerrel")
+        self._btn_generate.clicked.connect(self._generate)
+        self._btn_generate.setFixedHeight(36)
+
+        self._lbl_stale = QLabel("")
+        self._lbl_stale.setStyleSheet("color:#e8a020;font-size:11px;")
+        self._lbl_stale.setWordWrap(True)
+
+        gl.addWidget(self._btn_generate)
+        gl.addWidget(self._lbl_stale)
+        gl.addStretch()
+        cfg_row.addWidget(grp_gen)
 
         root.addLayout(cfg_row)
 
@@ -2771,26 +2682,6 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_workflow_dock()
         self._apply_dark_theme()
-
-        # ── Témaerkesztő (pipetta üzemmód) ────────────────────────────────
-        _config_dir = Path(__file__).parent
-        self._theme_editor = ThemeEditor(
-            QApplication.instance(), self,
-            self._base_qss, _config_dir)
-
-        # Toolbar gomb összekötése (a gomb már létezik, a ThemeEditor most)
-        self._theme_btn.clicked.connect(self._theme_editor.toggle)
-        self._theme_btn.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu)
-        self._theme_btn.customContextMenuRequested.connect(
-            lambda pos: self._theme_editor.show_context_menu(
-                self._theme_btn.mapToGlobal(pos)))
-
-        # Ctrl+T shortcut (üzemmódon kívül is működik)
-        from PyQt6.QtGui import QShortcut, QKeySequence
-        _sc = QShortcut(QKeySequence("Ctrl+T"), self)
-        _sc.activated.connect(self._theme_editor.toggle)
-
         self._update_workflow_state()
         self.statusBar().showMessage(tr("Kész."))
 
@@ -3044,8 +2935,8 @@ class MainWindow(QMainWindow):
         tb.setObjectName("main_toolbar")
         self.addToolBar(tb)
 
-        # ── Csoport-felirat segédfüggvény ────────────────────────────────────
-        def _group_label(text: str) -> QLabel:
+        # ── Lépés-felirat segédfüggvény ─────────────────────────────────────
+        def _step_label(text: str) -> QLabel:
             lbl = QLabel(f"  {text}  ")
             lbl.setStyleSheet(
                 "color:#6a8aaa; font-size:10px; font-weight:bold;"
@@ -3054,58 +2945,22 @@ class MainWindow(QMainWindow):
             return lbl
 
         # ════════════════════════════════════════════════════════════════════
-        # PROJEKT – bal oldal: életciklus + fájlkezelés
+        # 1. lépés – Képek betöltése
         # ════════════════════════════════════════════════════════════════════
-        tb.addWidget(_group_label("Projekt"))
-
-        act_new = QAction("🆕  Új", self)
-        act_new.setToolTip("Új, üres projekt (Ctrl+N)")
-        act_new.setShortcut("Ctrl+N")
-        act_new.triggered.connect(self.new_project)
-
-        act_open = QAction("📁  Megnyitás", self)
-        act_open.setToolTip("Projekt betöltése (Ctrl+O)")
-        act_open.setShortcut("Ctrl+O")
-        act_open.triggered.connect(self.load_project)
-
-        act_save = QAction("💾  Mentés", self)
-        act_save.setToolTip("Projekt mentése (Ctrl+S)")
-        act_save.setShortcut("Ctrl+S")
-        act_save.triggered.connect(self.save_project)
-
-        act_close_proj = QAction("✖  Lezárás", self)
-        act_close_proj.setToolTip("Az aktuális projekt lezárása")
-        act_close_proj.triggered.connect(self.close_project)
-
-        act_info = QAction("ℹ  Infó", self)
-        act_info.setToolTip("Projekt neve és megjegyzés szerkesztése (Ctrl+I)")
-        act_info.setShortcut("Ctrl+I")
-        act_info.triggered.connect(self.edit_project_info)
-
-        tb.addAction(act_new)
-        tb.addAction(act_open)
-        tb.addAction(act_save)
-        tb.addAction(act_close_proj)
-        tb.addAction(act_info)
-        tb.addSeparator()
-
-        # ════════════════════════════════════════════════════════════════════
-        # ① KÉPEK BETÖLTÉSE
-        # ════════════════════════════════════════════════════════════════════
-        tb.addWidget(_group_label("① Képek"))
+        tb.addWidget(_step_label("① Betöltés"))
 
         act_a = QAction(tr("📂  Kép A"), self)
-        act_a.setToolTip(tr("Kép A betöltése (Ctrl+1)\nAz animáció kiindulóképe (pl. előtte állapot)"))
-        act_a.setShortcut("Ctrl+1")
+        act_a.setToolTip(tr("① Kép A betöltése (Ctrl+1)\nAz animáció kiindulóképe (pl. előtte állapot)"))
         act_a.triggered.connect(lambda: self.load_image("A"))
 
         act_b = QAction(tr("📂  Kép B"), self)
-        act_b.setToolTip(tr("Kép B betöltése (Ctrl+2)\nAz animáció célképe (pl. utána állapot)"))
-        act_b.setShortcut("Ctrl+2")
+        act_b.setToolTip(tr("① Kép B betöltése (Ctrl+2)\nAz animáció célképe (pl. utána állapot)"))
         act_b.triggered.connect(lambda: self.load_image("B"))
 
-        act_both = QAction(tr("📂  A+B"), self)
-        act_both.setToolTip(tr("Két képfájl egyszerre kijelölése\nAz első lesz Kép A, a második Kép B"))
+        act_both = QAction(tr("📂  A + B együtt…"), self)
+        act_both.setToolTip(
+            tr("① Két képfájl egyszerre kijelölése\n"
+               "Az első lesz Kép A, a második Kép B"))
         act_both.triggered.connect(self.load_images_both)
 
         tb.addAction(act_a)
@@ -3114,57 +2969,77 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # ════════════════════════════════════════════════════════════════════
-        # ② GEOMETRIAI IGAZÍTÁS – dőlés (opcionális) + GCP (ajánlott)
+        # 2. lépés – Geometriai igazítás
         # ════════════════════════════════════════════════════════════════════
-        tb.addWidget(_group_label("② Igazítás"))
+        tb.addWidget(_step_label("② Igazítás"))
 
         act_tilt_a = QAction(tr("↕ Dőlés A"), self)
         act_tilt_a.setToolTip(
-            tr("Dőlés-korrekció az A képen (opcionális)\n"
-               "GCP igazítás előtt érdemes elvégezni."))
+            tr("Dőlés-korrekció az A képen\n\n"
+               "Hough-egyenesekkel megbecsüli a kép ferdeségét,\n"
+               "majd elforgatja a képet a függőleges tengelyhez igazítva.\n"
+               "A GCP igazítás előtt érdemes elvégezni."))
         act_tilt_a.triggered.connect(lambda: self._correct_tilt("a"))
+        tb.addAction(act_tilt_a)
 
         act_tilt_b = QAction(tr("↕ Dőlés B"), self)
         act_tilt_b.setToolTip(
-            tr("Dőlés-korrekció a B képen (opcionális)\n"
-               "GCP igazítás előtt érdemes elvégezni."))
+            tr("Dőlés-korrekció a B képen\n\n"
+               "Hough-egyenesekkel megbecsüli a kép ferdeségét,\n"
+               "majd elforgatja a képet a függőleges tengelyhez igazítva.\n"
+               "A GCP igazítás előtt érdemes elvégezni."))
         act_tilt_b.triggered.connect(lambda: self._correct_tilt("b"))
+        tb.addAction(act_tilt_b)
 
         act_gcp = QAction(tr("📍  GCP igazítás"), self)
         act_gcp.setToolTip(
-            tr("GCP-alapú geometriai igazítás  ← AJÁNLOTT\n\n"
-               "Jelölj meg 4–15 egyező pontot a két képen;\n"
-               "a program homográfiával igazítja az A képet a B-hez.\n"
-               "Utána az automata illesztés lényegesen pontosabb lesz."))
+            tr("② GCP-alapú geometriai igazítás  ← AJÁNLOTT\n\n"
+               "Jelölj meg 4–15 valódi egyező pontot (sarkok,\n"
+               "épületelemek stb.) a két képen, majd a program\n"
+               "homográfiával warpálja az A képet a B perspektívájába.\n\n"
+               "Ezután az automata illesztés lényegesen pontosabb lesz."))
         act_gcp.triggered.connect(self._open_gcp_alignment)
-
-        tb.addAction(act_tilt_a)
-        tb.addAction(act_tilt_b)
         tb.addAction(act_gcp)
+
         tb.addSeparator()
 
         # ════════════════════════════════════════════════════════════════════
-        # ③–⑧ TOVÁBBI LÉPÉSEK – a füleken
+        # 3–5. lépés – a Tab-okon látható (Automata / Szerkesztő / Előnézet / Export)
         # ════════════════════════════════════════════════════════════════════
-        tb.addWidget(_group_label("③–⑧  → Fülek"))
-
-        # ════════════════════════════════════════════════════════════════════
-        # 🎨 TÉMAERKESZTŐ – jobb szélen, mindig elérhető
-        # ════════════════════════════════════════════════════════════════════
+        tb.addWidget(_step_label("⑤–⑧ lásd fülek →"))
         tb.addSeparator()
 
-        # QToolButton: bal klikk = pipetta toggle, jobb klikk = séma-menü
-        self._theme_btn = QToolButton(self)
-        self._theme_btn.setText("🎨")
-        self._theme_btn.setToolTip(
-            "Témaerkesztő  (Ctrl+T)\n"
-            "Bal klikk: pipetta üzemmód be-/kikapcsolása\n"
-            "Jobb klikk: színsémák mentése / betöltése / visszaállítás"
-        )
-        self._theme_btn.setFixedSize(36, 28)
-        # A clicked és a contextMenu összekötése az _apply_dark_theme UTÁN
-        # történik (akkor már létezik self._theme_editor) – ld. __init__
-        tb.addWidget(self._theme_btn)
+        # ════════════════════════════════════════════════════════════════════
+        # Projekt mentés / betöltés (bármikor elérhető)
+        # ════════════════════════════════════════════════════════════════════
+        act_new = QAction("🆕  Új projekt", self)
+        act_new.setToolTip("Új, üres projekt (Ctrl+N)")
+        act_new.setShortcut("Ctrl+N")
+        act_new.triggered.connect(self.new_project)
+
+        act_close_proj = QAction("✖  Projekt lezárása", self)
+        act_close_proj.setToolTip("Az aktuális projekt lezárása\nVisszaáll az üres kezdőállapotra")
+        act_close_proj.triggered.connect(self.close_project)
+
+        act_info = QAction("ℹ  Projekt infó", self)
+        act_info.setToolTip("Projekt neve és megjegyzés szerkesztése (Ctrl+I)")
+        act_info.setShortcut("Ctrl+I")
+        act_info.triggered.connect(self.edit_project_info)
+
+        act_save = QAction("💾  Mentés", self)
+        act_save.setToolTip("Projekt mentése (Ctrl+S)\nMentés bármikor elvégezhető")
+        act_save.triggered.connect(self.save_project)
+
+        act_open = QAction("📁  Projekt megnyitása", self)
+        act_open.setToolTip("Projekt betöltése (Ctrl+O)\nKorábban mentett munkamenet")
+        act_open.triggered.connect(self.load_project)
+
+        tb.addAction(act_new)
+        tb.addAction(act_close_proj)
+        tb.addAction(act_info)
+        tb.addSeparator()
+        tb.addAction(act_save)
+        tb.addAction(act_open)
 
     # ── Dőlés-korrekció ────────────────────────────────────────────────────
 
@@ -3429,9 +3304,7 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_dark_theme(self) -> None:
-        # Az alap QSS-t eltároljuk, hogy a ThemeEditor mindig ehhez adja
-        # hozzá az override-okat, ne veszítse el az eredeti stílust.
-        self._base_qss = """
+        self.setStyleSheet("""
             QMainWindow, QWidget   { background-color:#1a1f24; color:#d7dde5; }
             QTabWidget::pane       { border:1px solid #343b45; }
             QTabBar::tab           { background:#252a33; color:#aaa;
@@ -3472,8 +3345,7 @@ class MainWindow(QMainWindow):
             QDockWidget#workflow_dock QPushButton
                                    { text-align:left; padding:4px 8px;
                                      font-size:11px; }
-        """
-        QApplication.instance().setStyleSheet(self._base_qss)
+        """)
 
     # ── Kép betöltése ────────────────────────────────────────────────────────
 

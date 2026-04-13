@@ -3,7 +3,7 @@
 # Ha a fájl nem létezik, a program beépített alapértékeket használ.
 
 [ui]
-language = "hu"
+language = "en"
 
 [match.superpoint]
 max_keypoints        = 4096
