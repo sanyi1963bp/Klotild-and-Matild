@@ -521,19 +521,20 @@ class PointEditorCanvas(QWidget):
                             self._smask_close_drawing()
                             return
                     if self._smask_drawing:
-                        # Új csúcs hozzáadása
+                        # Rajzolás közben: új csúcs hozzáadása
                         self._smask_poly.append((nx, ny))
                         self.update()
-                    else:
-                        # Meglévő csúcs fogása
+                    elif self._smask_poly:
+                        # Kész sokszög: csak csúcs-fogás engedélyezett, semmi más
                         hit = self._smask_hit(wx, wy)
                         if hit >= 0:
                             self._smask_drag_idx = hit
-                        else:
-                            # Új sokszög rajzolás kezdése
-                            self._smask_poly    = [(nx, ny)]
-                            self._smask_drawing = True
-                            self.update()
+                        # üres területre klikk → figyelmen kívül hagyjuk
+                    else:
+                        # Még nincs maszk → új sokszög rajzolás kezdése
+                        self._smask_poly    = [(nx, ny)]
+                        self._smask_drawing = True
+                        self.update()
             return
 
         # ── Középső gomb ─────────────────────────────────────────────────────
