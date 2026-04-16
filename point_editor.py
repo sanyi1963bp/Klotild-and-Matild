@@ -153,6 +153,9 @@ class PointEditorCanvas(QWidget):
     polyline_vertex_moved        = pyqtSignal(int, int, float, float)  # pidx, vidx, x, y
     polyline_delete_requested    = pyqtSignal(int)                      # pidx
     polyline_vertex_delete_requested = pyqtSignal(int, int)             # pidx, vidx
+    # Keresési maszk jelzések
+    smask_draw_finished          = pyqtSignal(list)   # norm. koordináták, sokszög lezárásakor
+    smask_poly_changed           = pyqtSignal(list)   # minden változáskor (gomb enable/disable)
 
     _IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
     _ZOOM_MIN  = 0.5
@@ -234,6 +237,13 @@ class PointEditorCanvas(QWidget):
         self._poly_hover_pidx: int = -1
         self._poly_hover_vidx: int = -1
 
+        # ── Keresési maszk sokszög ───────────────────────────────────────────
+        self._smask_poly:        List[Tuple[float, float]]   = []    # norm. (0-1) képkoord
+        self._smask_drawing:     bool                        = False  # rajzolás folyamatban
+        self._smask_draw_cursor: Optional[Tuple[float, float]] = None # egér poz. rajzolás közben
+        self._smask_drag_idx:    int                         = -1     # húzott csúcs indexe
+        self._smask_mode:        bool                        = False  # maszk mód aktív
+
         # ── Vonallánc előnézet (a Widget állítja be) ─────────────────────────
         self._preview_polyline:    Optional[List[Tuple[float, float]]] = None
         self._preview_cursor_line: bool = False   # True: szaggatott vonal az egérig
@@ -289,6 +299,62 @@ class PointEditorCanvas(QWidget):
         """
         self._polylines_data = [list(pl) for pl in data]
         self.update()
+
+    # ── Keresési maszk API ───────────────────────────────────────────────────
+
+    def set_smask_mode(self, active: bool) -> None:
+        """Maszk-rajzolás mód be/ki. Kikapcsoláskor a rajzolási kurzor törlődik."""
+        self._smask_mode = active
+        if not active:
+            self._smask_drawing     = False
+            self._smask_draw_cursor = None
+            self._smask_drag_idx    = -1
+        self.update()
+
+    def set_smask_poly(self, pts: List[Tuple[float, float]]) -> None:
+        """Maszk sokszög beállítása kívülről (tükrözéshez). Norm. (0-1) koordináták."""
+        self._smask_poly     = list(pts)
+        self._smask_drawing  = False
+        self._smask_drag_idx = -1
+        self.smask_poly_changed.emit(list(self._smask_poly))
+        self.update()
+
+    def clear_smask(self) -> None:
+        """Maszk törlése."""
+        self._smask_poly        = []
+        self._smask_drawing     = False
+        self._smask_draw_cursor = None
+        self._smask_drag_idx    = -1
+        self.smask_poly_changed.emit([])
+        self.update()
+
+    def get_smask_pixels(self) -> Optional[np.ndarray]:
+        """Maszk sokszög pixel-koordinátákban (N×2 float32 array), vagy None."""
+        if len(self._smask_poly) < 3 or self._img_size is None:
+            return None
+        iw, ih = self._img_size
+        return np.array([(nx * iw, ny * ih) for nx, ny in self._smask_poly],
+                        dtype=np.float32)
+
+    def _smask_hit(self, wx: float, wy: float) -> int:
+        """Melyik maszk-csúcs van a hit-radiuszon belül? -1 ha egyik sem."""
+        if not self._smask_poly or self._img_size is None:
+            return -1
+        iw, ih = self._img_size
+        for i, (nx, ny) in enumerate(self._smask_poly):
+            wpt = self._i2w(nx * iw, ny * ih)
+            if wpt and math.hypot(wx - wpt[0], wy - wpt[1]) <= _HIT_R:
+                return i
+        return -1
+
+    def _smask_close_drawing(self) -> None:
+        """Befejezi a maszk-rajzolást és jelzést küld."""
+        if len(self._smask_poly) >= 3:
+            self._smask_drawing     = False
+            self._smask_draw_cursor = None
+            self.smask_draw_finished.emit(list(self._smask_poly))
+            self.smask_poly_changed.emit(list(self._smask_poly))
+            self.update()
 
     def _hit_test_poly_vertex(self, wx: float, wy: float) -> Tuple[int, int]:
         """
@@ -440,6 +506,36 @@ class PointEditorCanvas(QWidget):
         wy  = float(event.position().y())
         btn = event.button()
 
+        # ── Maszk mód ────────────────────────────────────────────────────────
+        if self._smask_mode:
+            if btn == Qt.MouseButton.LeftButton and self._img_size is not None:
+                ic = self._w2i(wx, wy)
+                if ic is not None:
+                    iw, ih = self._img_size
+                    nx, ny = ic[0] / iw, ic[1] / ih
+                    if self._smask_drawing and len(self._smask_poly) >= 3:
+                        # Közel van az első csúcshoz → lezárás
+                        fx, fy = self._smask_poly[0]
+                        wpt0   = self._i2w(fx * iw, fy * ih)
+                        if wpt0 and math.hypot(wx - wpt0[0], wy - wpt0[1]) <= 12:
+                            self._smask_close_drawing()
+                            return
+                    if self._smask_drawing:
+                        # Új csúcs hozzáadása
+                        self._smask_poly.append((nx, ny))
+                        self.update()
+                    else:
+                        # Meglévő csúcs fogása
+                        hit = self._smask_hit(wx, wy)
+                        if hit >= 0:
+                            self._smask_drag_idx = hit
+                        else:
+                            # Új sokszög rajzolás kezdése
+                            self._smask_poly    = [(nx, ny)]
+                            self._smask_drawing = True
+                            self.update()
+            return
+
         # ── Középső gomb ─────────────────────────────────────────────────────
         if btn == Qt.MouseButton.MiddleButton:
             self._reset_zoom()
@@ -543,6 +639,11 @@ class PointEditorCanvas(QWidget):
         Vonallánc csúcson: elnyelés (ne indítson új vonalat).
         """
         if event.button() == Qt.MouseButton.LeftButton:
+            # Maszk mód: dupla klikk = sokszög lezárása
+            if self._smask_mode:
+                self._smask_close_drawing()
+                return
+
             wx   = float(event.position().x())
             wy   = float(event.position().y())
             ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -607,6 +708,25 @@ class PointEditorCanvas(QWidget):
         wy = float(event.position().y())
 
         self._cursor_pos = (wx, wy)
+
+        # ── Maszk mód egér-mozgás ────────────────────────────────────────────
+        if self._smask_mode:
+            if self._smask_drag_idx >= 0 and self._img_size is not None:
+                # Csúcs húzása
+                ic = self._w2i(wx, wy)
+                if ic is not None:
+                    iw, ih = self._img_size
+                    self._smask_poly[self._smask_drag_idx] = (ic[0] / iw, ic[1] / ih)
+                    self.smask_poly_changed.emit(list(self._smask_poly))
+                    self.update()
+            elif self._smask_drawing and self._img_size is not None:
+                # Rajzolás közbeni előnézet
+                ic = self._w2i(wx, wy)
+                if ic is not None:
+                    iw, ih = self._img_size
+                    self._smask_draw_cursor = (ic[0] / iw, ic[1] / ih)
+                    self.update()
+            return
 
         # Sokszög preview, vonallánc preview cursor-vonal → újrarajzolás
         if self._poly_mode or (self._preview_polyline and self._preview_cursor_line):
@@ -733,6 +853,11 @@ class PointEditorCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        # ── Maszk csúcs elengedése ───────────────────────────────────────────
+        if event.button() == Qt.MouseButton.LeftButton and self._smask_drag_idx >= 0:
+            self._smask_drag_idx = -1
+            return
+
         if event.button() == Qt.MouseButton.LeftButton and self._roi_mode:
             self._roi_mode      = ""
             self._roi_img_start = None
@@ -1271,6 +1396,63 @@ class PointEditorCanvas(QWidget):
                 f"Ejtsd ide!\n({self.title})"
             )
 
+        # ── Keresési maszk sokszög ───────────────────────────────────────────
+        if self._smask_poly and self._img_size is not None:
+            iw, ih = self._img_size
+            poly_w = []
+            for nx, ny in self._smask_poly:
+                wpt = self._i2w(nx * iw, ny * ih)
+                if wpt:
+                    poly_w.append(QPointF(wpt[0], wpt[1]))
+            if len(poly_w) >= 2:
+                # Kitöltés (csak lezárt sokszög esetén)
+                if not self._smask_drawing and len(poly_w) >= 3:
+                    path_fill = QPainterPath()
+                    path_fill.moveTo(poly_w[0])
+                    for p in poly_w[1:]:
+                        path_fill.lineTo(p)
+                    path_fill.closeSubpath()
+                    painter.setBrush(QBrush(QColor(50, 200, 100, 35)))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawPath(path_fill)
+                # Kontúr
+                pen_style = Qt.PenStyle.DashLine if self._smask_drawing else Qt.PenStyle.SolidLine
+                painter.setPen(QPen(QColor(50, 200, 100, 220), 2, pen_style))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for k in range(len(poly_w) - 1):
+                    painter.drawLine(poly_w[k], poly_w[k + 1])
+                if not self._smask_drawing and len(poly_w) >= 3:
+                    painter.drawLine(poly_w[-1], poly_w[0])
+                # Csúcs-körök
+                for k, p in enumerate(poly_w):
+                    if k == 0 and self._smask_drawing and len(poly_w) >= 3:
+                        # Első csúcs sárga kiemelés: ide klikkelve zárul a sokszög
+                        painter.setBrush(QBrush(QColor(255, 230, 50, 230)))
+                        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+                        painter.drawEllipse(p, 7, 7)
+                    else:
+                        painter.setBrush(QBrush(QColor(50, 200, 100, 210)))
+                        painter.setPen(QPen(QColor(255, 255, 255), 1))
+                        painter.drawEllipse(p, 5, 5)
+                # Szaggatott vonal az egérig (rajzolás közben)
+                if self._smask_drawing and self._smask_draw_cursor and len(poly_w) >= 1:
+                    nx, ny = self._smask_draw_cursor
+                    cur_w  = self._i2w(nx * iw, ny * ih)
+                    if cur_w:
+                        painter.setPen(QPen(QColor(50, 200, 100, 130), 1, Qt.PenStyle.DotLine))
+                        painter.drawLine(poly_w[-1], QPointF(cur_w[0], cur_w[1]))
+                # Felirat ("MASZK" a sokszög fölé)
+                if len(poly_w) >= 2:
+                    cx = sum(p.x() for p in poly_w) / len(poly_w)
+                    cy = min(p.y() for p in poly_w) - 10
+                    font_m = QFont()
+                    font_m.setPointSize(8)
+                    font_m.setBold(True)
+                    painter.setFont(font_m)
+                    painter.setPen(QPen(QColor(50, 200, 100, 200), 1))
+                    lbl = "MASZK (rajzolás…)" if self._smask_drawing else "MASZK"
+                    painter.drawText(int(cx) - 30, int(cy), lbl)
+
         # ── Alosztály-réteg (pl. GCPCanvas overlay) ──────────────────────────
         self._paint_overlay(painter)
         painter.end()
@@ -1304,6 +1486,7 @@ class PointEditorWidget(QWidget):
     points_changed            = pyqtSignal()
     roi_search_requested      = pyqtSignal(list, str, bool, str)
     dual_roi_search_requested = pyqtSignal(object, object, bool, str)
+    mask_search_requested     = pyqtSignal(list, list)   # (poly_a_norm, poly_b_norm)
     image_a_drop_requested    = pyqtSignal(str)
     image_b_drop_requested    = pyqtSignal(str)
 
@@ -1386,6 +1569,48 @@ class PointEditorWidget(QWidget):
         )
         self.btn_roi_clear.clicked.connect(self._clear_rois)
 
+        # ── Maszk gombok ─────────────────────────────────────────────────────
+        self.btn_smask = QPushButton(tr("🎭  Maszk"))
+        self.btn_smask.setCheckable(True)
+        self.btn_smask.setFixedHeight(28)
+        self.btn_smask.setToolTip(
+            tr("Maszk-sokszög rajzolása\n"
+               "Klikk: csúcs hozzáadása  |  Dupla klikk / első csúcsra klikk: lezárás\n"
+               "Az egyik képen rajzolt maszk automatikusan megjelenik a másikon is,\n"
+               "de mindkét oldalon egymástól függetlenül szerkeszthető"))
+        self.btn_smask.setStyleSheet(
+            "QPushButton{background:#2a3a2a;color:#aaa;padding:0 10px;"
+            "border-radius:4px;font-size:12px;border:1px solid #444;}"
+            "QPushButton:checked{background:#1a4a2e;color:#6de89a;border:1px solid #3a8a5a;}"
+            "QPushButton:hover{background:#344434;}"
+        )
+        self.btn_smask.toggled.connect(self._on_smask_mode_toggled)
+
+        self.btn_smask_clear = QPushButton(tr("🗑  Maszk törlése"))
+        self.btn_smask_clear.setEnabled(False)
+        self.btn_smask_clear.setFixedHeight(28)
+        self.btn_smask_clear.setStyleSheet(
+            "QPushButton{background:#2e2e2e;color:#aaa;padding:0 10px;"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#3a3a3a;}"
+            "QPushButton:disabled{background:#252525;color:#444;}"
+        )
+        self.btn_smask_clear.clicked.connect(self._clear_smask)
+
+        self.btn_smask_search = QPushButton(tr("🔍  Keresés a maszkban"))
+        self.btn_smask_search.setEnabled(False)
+        self.btn_smask_search.setFixedHeight(28)
+        self.btn_smask_search.setToolTip(
+            tr("LightGlue futtatása csak a maszkon belüli területen\n"
+               "A talált pontokat hozzáadja a meglévőkhöz"))
+        self.btn_smask_search.setStyleSheet(
+            "QPushButton{background:#1a3a4a;color:#eee;padding:0 10px;"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#246058;}"
+            "QPushButton:disabled{background:#252525;color:#444;}"
+        )
+        self.btn_smask_search.clicked.connect(self._on_smask_search)
+
         self.lbl_hint = QLabel(
             tr("Klikk: pont  |  2× klikk: vonallánc start/vég  |  "
                "Húzás: kijelölés  |  Ctrl+húzás: ROI  |  Delete: törlés  |  Görgetés: zoom")
@@ -1403,6 +1628,10 @@ class PointEditorWidget(QWidget):
         bar.addSpacing(4)
         bar.addWidget(self.btn_roi_search)
         bar.addWidget(self.btn_roi_clear)
+        bar.addSpacing(8)
+        bar.addWidget(self.btn_smask)
+        bar.addWidget(self.btn_smask_clear)
+        bar.addWidget(self.btn_smask_search)
         bar.addSpacing(8)
         bar.addWidget(self.lbl_hint)
         bar.addSpacing(8)
@@ -1476,6 +1705,12 @@ class PointEditorWidget(QWidget):
         self.canvas_b.polyline_delete_requested.connect(self._delete_polyline)
         self.canvas_a.polyline_vertex_delete_requested.connect(self._on_poly_vertex_delete)
         self.canvas_b.polyline_vertex_delete_requested.connect(self._on_poly_vertex_delete)
+
+        # Maszk tükrözés: rajzolás befejezésekor a másik canvasra másolja
+        self.canvas_a.smask_draw_finished.connect(self._on_smask_a_finished)
+        self.canvas_b.smask_draw_finished.connect(self._on_smask_b_finished)
+        self.canvas_a.smask_poly_changed.connect(lambda _: self._update_smask_buttons())
+        self.canvas_b.smask_poly_changed.connect(lambda _: self._update_smask_buttons())
 
     # ── Publikus API ─────────────────────────────────────────────────────────
 
@@ -1910,6 +2145,45 @@ class PointEditorWidget(QWidget):
         self.canvas_a.clear_roi()
         self.canvas_b.clear_roi()
         self._update_roi_buttons()
+
+    # ── Maszk metódusok ──────────────────────────────────────────────────────
+
+    def _on_smask_mode_toggled(self, checked: bool) -> None:
+        self.canvas_a.set_smask_mode(checked)
+        self.canvas_b.set_smask_mode(checked)
+
+    def _on_smask_a_finished(self, pts: list) -> None:
+        """A kép maszkjának befejezésekor automatikusan tükrözi B-re."""
+        self.canvas_b.set_smask_poly(pts)
+        self._update_smask_buttons()
+
+    def _on_smask_b_finished(self, pts: list) -> None:
+        """B kép maszkjának befejezésekor automatikusan tükrözi A-ra."""
+        self.canvas_a.set_smask_poly(pts)
+        self._update_smask_buttons()
+
+    def _clear_smask(self) -> None:
+        self.canvas_a.clear_smask()
+        self.canvas_b.clear_smask()
+        self._update_smask_buttons()
+
+    def _update_smask_buttons(self) -> None:
+        has_a = len(self.canvas_a._smask_poly) >= 3
+        has_b = len(self.canvas_b._smask_poly) >= 3
+        self.btn_smask_clear.setEnabled(has_a or has_b)
+        self.btn_smask_search.setEnabled(has_a and has_b)
+
+    def _on_smask_search(self) -> None:
+        poly_a = list(self.canvas_a._smask_poly)
+        poly_b = list(self.canvas_b._smask_poly)
+        if len(poly_a) >= 3 and len(poly_b) >= 3:
+            self.mask_search_requested.emit(poly_a, poly_b)
+
+    def get_smask_polys(self):
+        """Visszaadja a két maszk sokszöget norm. koordinátákban, vagy (None, None)."""
+        pa = list(self.canvas_a._smask_poly) if len(self.canvas_a._smask_poly) >= 3 else None
+        pb = list(self.canvas_b._smask_poly) if len(self.canvas_b._smask_poly) >= 3 else None
+        return pa, pb
 
     def _on_dual_roi_search(self) -> None:
         roi_a = self.canvas_a.get_roi_image()

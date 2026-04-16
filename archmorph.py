@@ -2810,6 +2810,8 @@ class MainWindow(QMainWindow):
             self.run_roi_match)
         self.editor_tab.point_editor.dual_roi_search_requested.connect(
             self.run_dual_roi_match)
+        self.editor_tab.point_editor.mask_search_requested.connect(
+            self.run_mask_match)
         # kép drag & drop a canvasokon → betöltés
         self.editor_tab.point_editor.image_a_drop_requested.connect(
             lambda p: self._load_image_from_path(p, "A"))
@@ -3904,6 +3906,162 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("Illesztési hiba"),
                                  log_exception_text(tr("Hiba az illesztés során:"), exc))
             self.statusBar().showMessage(tr("Illesztés sikertelen."))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    # ── Maszk-alapú keresés (kivágás + LightGlue a területen belül) ─────────
+
+    def run_mask_match(
+        self,
+        poly_a_norm: list,   # [(nx, ny), ...] norm. (0–1) koordináták, A képre
+        poly_b_norm: list,   # [(nx, ny), ...] norm. (0–1) koordináták, B képre
+    ) -> None:
+        """
+        LightGlue futtatása kizárólag a maszk-sokszögek belsejében.
+
+        Stratégia:
+          1. A sokszög bounding box-át kivágjuk mindkét képből.
+          2. A kivágott képpáron futtatjuk a LightGlue-t.
+          3. Csak a sokszög belsejébe eső pontokat tartjuk meg.
+          4. A koordinátákat visszatranszformáljuk az eredeti képtérbe.
+          5. Hozzáfűzzük a meglévő pontpárokhoz.
+
+        Ez a megközelítés akkor is talál pontokat ahol az egész képre futtatva
+        nem találna, mert a LightGlue a kivágott területre fókuszál (nincs
+        verseny a jobb texturájú háttér-régiókkal).
+        """
+        if self.project.image_a is None or self.project.image_b is None:
+            QMessageBox.warning(self, tr("Hiányzó kép"), tr("Tölts be mindkét képet!"))
+            return
+        if len(poly_a_norm) < 3 or len(poly_b_norm) < 3:
+            return
+
+        params  = self.auto_tab.get_match_params()
+        backend = params["backend"]
+        self.statusBar().showMessage(
+            tr("Maszk-keresés  [") + f"{backend}]…")
+        QApplication.processEvents()
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            img_a = self.project.image_a   # H×W×3 numpy BGR
+            img_b = self.project.image_b
+            ha, wa = img_a.shape[:2]
+            hb, wb = img_b.shape[:2]
+
+            # ── Pixel-koordinátájú sokszögek ──────────────────────────────────
+            poly_a_px = np.array([(nx * wa, ny * ha) for nx, ny in poly_a_norm],
+                                 dtype=np.float32)
+            poly_b_px = np.array([(nx * wb, ny * hb) for nx, ny in poly_b_norm],
+                                 dtype=np.float32)
+
+            # ── Bounding box-ok (clamped) ─────────────────────────────────────
+            def _bbox(poly, W, H):
+                xs, ys = poly[:, 0], poly[:, 1]
+                x0, y0 = int(max(0,     np.floor(xs.min()))),  \
+                         int(max(0,     np.floor(ys.min())))
+                x1, y1 = int(min(W - 1, np.ceil(xs.max()))),   \
+                         int(min(H - 1, np.ceil(ys.max())))
+                return x0, y0, x1, y1
+
+            ax0, ay0, ax1, ay1 = _bbox(poly_a_px, wa, ha)
+            bx0, by0, bx1, by1 = _bbox(poly_b_px, wb, hb)
+
+            if (ax1 - ax0) < 10 or (ay1 - ay0) < 10 or \
+               (bx1 - bx0) < 10 or (by1 - by0) < 10:
+                QMessageBox.warning(self, tr("Maszk keresés"),
+                                    tr("A maszk területe túl kicsi."))
+                return
+
+            # ── Kivágott képek ────────────────────────────────────────────────
+            crop_a = img_a[ay0:ay1, ax0:ax1].copy()
+            crop_b = img_b[by0:by1, bx0:bx1].copy()
+
+            # ── LightGlue futtatása a crop-okon ──────────────────────────────
+            result = self._run_backend(crop_a, crop_b, params)
+            if result is None:
+                self.statusBar().showMessage(tr("Maszk-keresés megszakítva."))
+                return
+            pts_ca, pts_cb, _device = result
+
+            if len(pts_ca) == 0:
+                self.statusBar().showMessage(
+                    tr("Maszk-keresés: a területen belül nincs egyezés."))
+                return
+
+            # ── Koordináta-visszatranszformálás (crop → eredeti kép) ─────────
+            pts_a_full = pts_ca + np.array([ax0, ay0], dtype=np.float32)
+            pts_b_full = pts_cb + np.array([bx0, by0], dtype=np.float32)
+
+            # ── Sokszög-szűrés (csak a maszkon belüli pontok) ────────────────
+            def _in_poly(pt, poly_np):
+                if cv2 is None:
+                    xs, ys = poly_np[:, 0], poly_np[:, 1]
+                    return bool(xs.min() <= pt[0] <= xs.max()
+                                and ys.min() <= pt[1] <= ys.max())
+                return cv2.pointPolygonTest(poly_np, (float(pt[0]), float(pt[1])), False) >= 0
+
+            mask_in = np.array(
+                [_in_poly(pa, poly_a_px) and _in_poly(pb, poly_b_px)
+                 for pa, pb in zip(pts_a_full, pts_b_full)],
+                dtype=bool,
+            )
+            pts_a_in = pts_a_full[mask_in]
+            pts_b_in = pts_b_full[mask_in]
+
+            if len(pts_a_in) == 0:
+                self.statusBar().showMessage(
+                    tr("Maszk-keresés: a sokszög belsejében nincs egyezés."))
+                return
+
+            # ── RANSAC (ha be van kapcsolva, ≥4 pont esetén) ─────────────────
+            if params["use_ransac"] and len(pts_a_in) >= 4:
+                try:
+                    pts_a_in, pts_b_in, _, _ = filter_matches_with_ransac(
+                        pts_a_in, pts_b_in,
+                        reproj_threshold=params["reproj_threshold"])
+                except Exception:
+                    pass
+
+            # ── Duplikátum-szűrés (ha már van közelben pont) ─────────────────
+            existing_a = np.array(self.project.anchor_points_a, dtype=np.float32) \
+                         if self.project.anchor_points_a else None
+            _DEDUP_R = 6.0
+
+            def _is_dup(pa):
+                if existing_a is None or len(existing_a) == 0:
+                    return False
+                d = np.linalg.norm(existing_a - pa, axis=1)
+                return bool(d.min() < _DEDUP_R)
+
+            self.editor_tab.point_editor._push_undo()
+            added = 0
+            for pa, pb in zip(pts_a_in.tolist(), pts_b_in.tolist()):
+                if not _is_dup(pa):
+                    self.project.anchor_points_a.append(pa)
+                    self.project.anchor_points_b.append(pb)
+                    added += 1
+                    # Frissítjük az existing_a tömböt
+                    existing_a = np.array(self.project.anchor_points_a,
+                                          dtype=np.float32)
+
+            self.editor_tab.refresh_views()
+            self.project.auto_match_done = True
+            self._update_workflow_state()
+            n_all = len(self.project.anchor_points_a)
+            self.statusBar().showMessage(
+                f"{tr('Maszk-keresés kész')}  –  "
+                f"+{added} {tr('új pont')} "
+                f"({len(pts_ca)} {tr('találat')}, "
+                f"{len(pts_a_in)} {tr('belül')}, "
+                f"{added} {tr('duplikátum nélkül')})  |  "
+                f"{tr('Összesen')}: {n_all} {tr('pontpár')}"
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(self, tr("Maszk-keresés hiba"),
+                                 log_exception_text(tr("Hiba:"), exc))
+            self.statusBar().showMessage(tr("Maszk-keresés sikertelen."))
         finally:
             QApplication.restoreOverrideCursor()
 
