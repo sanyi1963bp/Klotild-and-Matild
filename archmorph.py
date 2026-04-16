@@ -3003,10 +3003,10 @@ class MainWindow(QMainWindow):
 
         # Tab-ok a munkafolyamat sorrendjében:
         #   ③ Pont szerkesztő  →  ④ Automata illesztés  →  ⑤ Előnézet  →  ⑥ Export
-        self.tabs.addTab(self.editor_tab,  tr("⑤  ✏️  Pontszerkesztő"))
-        self.tabs.addTab(self.auto_tab,    tr("⑥  ⚡  Automata illesztés"))
-        self.tabs.addTab(self.preview_tab, tr("⑦  🔍  Előnézet"))
-        self.tabs.addTab(self.export_tab,  tr("⑧  🎬  Export"))
+        self.tabs.addTab(self.editor_tab,  tr("✏️  Szerkesztő"))
+        self.tabs.addTab(self.auto_tab,    tr("⚡  Illesztés"))
+        self.tabs.addTab(self.preview_tab, tr("🔍  Előnézet"))
+        self.tabs.addTab(self.export_tab,  tr("🎬  Export"))
 
         if _HAS_CONFIG_EDITOR:
             self.settings_tab = ConfigEditorTab(self)
@@ -3021,51 +3021,64 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         mb = self.menuBar()
 
-        # Fájl menü
+        # ── Fájl menü ────────────────────────────────────────────────────────
         file_menu = mb.addMenu(tr("Fájl"))
 
-        act_new_proj = QAction(tr("Új projekt"), self)
+        # Projekt kezelés
+        act_new_proj = QAction(tr("🆕  Új projekt"), self)
         act_new_proj.setShortcut("Ctrl+N")
         act_new_proj.triggered.connect(self.new_project)
 
-        act_close_proj = QAction(tr("Projekt lezárása"), self)
-        act_close_proj.triggered.connect(self.close_project)
+        act_load = QAction(tr("📁  Projekt megnyitása…"), self)
+        act_load.setShortcut("Ctrl+O")
+        act_load.triggered.connect(self.load_project)
 
-        act_proj_info = QAction(tr("Projekt neve és megjegyzés…"), self)
-        act_proj_info.setShortcut("Ctrl+I")
-        act_proj_info.triggered.connect(self.edit_project_info)
-
-        act_load_a = QAction(tr("Kép A betöltése…"), self)
-        act_load_a.setShortcut("Ctrl+1")
-        act_load_a.triggered.connect(lambda: self.load_image("A"))
-
-        act_load_b = QAction(tr("Kép B betöltése…"), self)
-        act_load_b.setShortcut("Ctrl+2")
-        act_load_b.triggered.connect(lambda: self.load_image("B"))
-
-        act_save = QAction(tr("Projekt mentése…"), self)
+        act_save = QAction(tr("💾  Projekt mentése…"), self)
         act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self.save_project)
 
-        act_load = QAction(tr("Projekt megnyitása…"), self)
-        act_load.setShortcut("Ctrl+O")
-        act_load.triggered.connect(self.load_project)
+        act_close_proj = QAction(tr("✖  Projekt lezárása"), self)
+        act_close_proj.triggered.connect(self.close_project)
+
+        act_proj_info = QAction(tr("ℹ  Projekt neve / megjegyzés…"), self)
+        act_proj_info.setShortcut("Ctrl+I")
+        act_proj_info.triggered.connect(self.edit_project_info)
+
+        file_menu.addAction(act_new_proj)
+        file_menu.addAction(act_load)
+        file_menu.addAction(act_save)
+        file_menu.addAction(act_close_proj)
+        file_menu.addAction(act_proj_info)
+        file_menu.addSeparator()
+
+        # Képek betöltése
+        act_load_ab = QAction(tr("📂  Kép(ek) megnyitása…"), self)
+        act_load_ab.setShortcut("Ctrl+1")
+        act_load_ab.setToolTip(
+            tr("Egy vagy két képfájl kijelölése.\n"
+               "• 1 fájl → A-ba töltődik (ha A üres), különben B-be\n"
+               "• Ctrl+klikkel 2 fájlt jelölj ki → első = A, második = B"))
+        act_load_ab.triggered.connect(lambda: self.load_image(""))
+
+        act_load_a = QAction(tr("📂  Kép A betöltése…"), self)
+        act_load_a.setShortcut("Ctrl+Shift+A")
+        act_load_a.triggered.connect(lambda: self.load_image("A"))
+
+        act_load_b = QAction(tr("📂  Kép B betöltése…"), self)
+        act_load_b.setShortcut("Ctrl+Shift+B")
+        act_load_b.triggered.connect(lambda: self.load_image("B"))
+
+        file_menu.addAction(act_load_ab)
+        file_menu.addAction(act_load_a)
+        file_menu.addAction(act_load_b)
+        file_menu.addSeparator()
 
         act_quit = QAction(tr("Kilépés"), self)
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
-
-        file_menu.addAction(act_new_proj)
-        file_menu.addAction(act_close_proj)
-        file_menu.addAction(act_proj_info)
-        file_menu.addSeparator()
-        file_menu.addActions([act_load_a, act_load_b])
-        file_menu.addSeparator()
-        file_menu.addActions([act_save, act_load])
-        file_menu.addSeparator()
         file_menu.addAction(act_quit)
 
-        # Szerkesztés menü
+        # ── Szerkesztés menü ─────────────────────────────────────────────────
         edit_menu = mb.addMenu(tr("Szerkesztés"))
 
         act_undo = QAction(tr("Visszavonás"), self)
@@ -3078,7 +3091,7 @@ class MainWindow(QMainWindow):
         act_clear_pts.triggered.connect(self.clear_all_points)
         edit_menu.addAction(act_clear_pts)
 
-        # Nyelv / Language menü
+        # ── Nyelv / Language menü ────────────────────────────────────────────
         lang_menu = mb.addMenu(tr("Language / Nyelv"))
 
         act_hu = QAction(tr("Magyar"), self)
@@ -3224,6 +3237,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, tr("Hiba / Error"), f"Language change failed: {e}")
 
     def _build_toolbar(self) -> None:
+        """A toolbar megszűnt. A témaerkesztő gomb a menüsor jobb sarkába kerül."""
+        self._theme_btn = QToolButton(self)
+        self._theme_btn.setText("🎨")
+        self._theme_btn.setToolTip(
+            "Témaerkesztő  (Ctrl+T)\n"
+            "Bal klikk: pipetta üzemmód be-/kikapcsolása\n"
+            "Jobb klikk: színsémák mentése / betöltése / visszaállítás"
+        )
+        self._theme_btn.setFixedSize(36, 24)
+        self._theme_btn.setStyleSheet(
+            "QToolButton{background:#1a1f2c;color:#aaa;border:none;font-size:14px;}"
+            "QToolButton:hover{background:#2a3040;color:#eee;}"
+        )
+        self.menuBar().setCornerWidget(
+            self._theme_btn, Qt.Corner.TopRightCorner)
+        return  # Toolbar nem kerül az ablakra
+
+        # ──────────────────────────────────────────────────────────────────
+        # (A lenti kód megmaradt referenciaként, de soha nem fut le)
         tb = QToolBar(tr("Gyorseszközök"))
         tb.setMovable(False)
         tb.setObjectName("main_toolbar")
@@ -3987,30 +4019,40 @@ class MainWindow(QMainWindow):
             f"({img.shape[1]}×{img.shape[0]} px)"
         )
 
-    def load_image(self, slot: str) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("Kép ") + f"{slot} " + tr("megnyitása"), "",
-            tr("Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)")
-        )
-        if path:
-            self._load_image_from_path(path, slot)
+    def load_image(self, slot: str = "") -> None:
+        """
+        Képbetöltés multi-select dialóggal.
 
-    def load_images_both(self) -> None:
-        """Két képfájl egyszerre kijelölése – az első lesz A, a második B."""
+        • 1 fájl kijelölve  → a megadott slotba (A/B), vagy ha slot="":
+                               A-ba ha üres, különben B-be.
+        • 2 fájl kijelölve  → első = A, második = B  (Ctrl+klikk a második fájlra).
+        • Ctrl+klikkel egyszerre kijelölhető A és B is.
+        """
+        title = (tr("Kép A és/vagy B megnyitása  –  Ctrl+klikk: több fájl")
+                 if not slot else
+                 tr(f"Kép {slot} megnyitása  –  Ctrl+klikk: egyszerre A+B"))
         paths, _ = QFileDialog.getOpenFileNames(
-            self, tr("Két kép kijelölése (első = A, második = B)"), "",
+            self, title, "",
             tr("Képfájlok (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;Minden fájl (*)")
         )
         if not paths:
             return
-        if len(paths) >= 1:
+        if len(paths) == 1:
+            # Egy fájl: slotba, ha slot üres → A ha üres, különben B
+            target = slot or ("A" if self.project.image_a is None else "B")
+            self._load_image_from_path(paths[0], target)
+        else:
+            # Két (vagy több) fájl: első = A, második = B
             self._load_image_from_path(paths[0], "A")
-        if len(paths) >= 2:
             self._load_image_from_path(paths[1], "B")
-        if len(paths) > 2:
-            self.statusBar().showMessage(
-                tr("Kép A+B betöltve  –  ") + f"{len(paths) - 2} " + tr("fájl figyelmen kívül hagyva.")
-            )
+            if len(paths) > 2:
+                self.statusBar().showMessage(
+                    tr("Kép A+B betöltve  –  ") +
+                    f"{len(paths) - 2} " + tr("fájl figyelmen kívül hagyva."))
+
+    def load_images_both(self) -> None:
+        """Visszafelé-kompatibilis alias → load_image()."""
+        self.load_image("")
 
     # ── Automatikus illesztés ────────────────────────────────────────────────
 
