@@ -909,6 +909,131 @@ def generate_morph_frames_triangle(
 #  Optikai folyam morph
 # ════════════════════════════════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════════════════════
+#  TPS (Thin Plate Spline) morph
+# ════════════════════════════════════════════════════════════════════════════
+
+def generate_morph_frames_tps(
+    img_a:     np.ndarray,
+    img_b:     np.ndarray,
+    pts_a:     List[Tuple[float, float]],
+    pts_b:     List[Tuple[float, float]],
+    n_frames:  int   = 40,
+    easing:    str   = "S-görbe",
+    ping_pong: bool  = False,
+    smoothing: float = 0.0,
+    scale:     float = 1.0,   # 0.5 = fél felbontáson számolja a map-et (gyorsabb)
+) -> List[np.ndarray]:
+    """
+    Thin Plate Spline alapú morph.
+
+    A TPS globálisan sima deformációs mezőt számol, ezért nincs háromszög-határ
+    és természetesebb az egyenes vonalak (kősorok, ablakkeretek) morfja.
+
+    Algoritmus:
+      • Kontrollpont-párokat (pa→pb) t-vel interpolálva kapjuk a köztes pi pozíciókat.
+      • Inverz TPS: pi → pa  és  pi → pb  (output-pixelből forrás-pixel).
+      • cv2.remap a két képre, majd alpha-keverés.
+      • Határrögzítők (sarok + élközép pontok, identity mapping) megelőzik
+        a konvex hull szélén való kilengést.
+
+    Paraméterek:
+      smoothing : 0.0 = pontos interpoláció (átmegy minden kontrollponton);
+                  >0  = simítás (outlier-tűrés, de elveszti az egzaktságot)
+      scale     : remap-térkép számítási felbontása (0.5 = gyorsabb, kicsit durvább)
+    """
+    try:
+        from scipy.interpolate import RBFInterpolator
+    except ImportError:
+        raise RuntimeError(
+            "A TPS morphhoz a scipy csomag szükséges.\n"
+            "Telepítés: pip install scipy")
+
+    if cv2 is None:
+        raise RuntimeError("Az OpenCV (cv2) nincs telepítve.")
+    if len(pts_a) < 4 or len(pts_b) < 4:
+        raise ValueError(
+            "TPS morphhoz legalább 4 pontpár szükséges!\n"
+            "Adj hozzá több anchor pontot, vagy válassz más módszert.")
+
+    h, w = img_b.shape[:2]
+
+    # ── Kontrollpontok float64 tömbként ──────────────────────────────────────
+    pa_np = np.array(pts_a, dtype=np.float64)
+    pb_np = np.array(pts_b, dtype=np.float64)
+
+    # ── Határrögzítők (sarokpontok + élközéppontok, identity mapping) ────────
+    # Ezek megakadályozzák hogy a TPS a képhatáron kívül kilengjen.
+    border = np.array([
+        [0,       0],     [w * .25, 0],     [w * .5, 0],     [w * .75, 0],     [w - 1, 0],
+        [0,       h*.25], [w - 1,   h*.25],
+        [0,       h*.5],  [w - 1,   h*.5],
+        [0,       h*.75], [w - 1,   h*.75],
+        [0,       h - 1], [w * .25, h - 1], [w * .5, h - 1], [w * .75, h - 1], [w - 1, h - 1],
+    ], dtype=np.float64)
+
+    pa_full = np.vstack([pa_np, border])
+    pb_full = np.vstack([pb_np, border])
+
+    # ── Sűrű értékelési rács (opcionálisan kisebb felbontáson) ───────────────
+    s    = float(np.clip(scale, 0.25, 1.0))
+    sw   = max(4, int(round(w * s)))
+    sh   = max(4, int(round(h * s)))
+    gy, gx = np.mgrid[0:sh, 0:sw]
+    # Visszaskálázott koordináták az eredeti képtérbe
+    gx_f = (gx.astype(np.float64) / (sw - 1)) * (w - 1)
+    gy_f = (gy.astype(np.float64) / (sh - 1)) * (h - 1)
+    grid = np.column_stack([gx_f.ravel(), gy_f.ravel()])  # (sh*sw, 2)
+
+    func   = EASING_FUNCS.get(easing, _easing_linear)
+    n      = max(n_frames, 2)
+    frames: List[np.ndarray] = []
+
+    for i in range(n):
+        t_raw = i / (n - 1)
+        t     = func(t_raw)
+
+        # Köztes pozíciók (lineárisan interpolálva a kontrollpontokon)
+        pi_full = pa_full * (1.0 - t) + pb_full * t
+
+        # Inverz TPS: pi → pa  (melyik A-pixelből jön az output pixel)
+        rbf_a = RBFInterpolator(pi_full, pa_full,
+                                kernel='thin_plate_spline', smoothing=smoothing)
+        # Inverz TPS: pi → pb
+        rbf_b = RBFInterpolator(pi_full, pb_full,
+                                kernel='thin_plate_spline', smoothing=smoothing)
+
+        src_a = rbf_a(grid)   # (sh*sw, 2)
+        src_b = rbf_b(grid)
+
+        # Remap-térképek (small→full felbontás, ha scale < 1)
+        def _make_maps(src):
+            mx = src[:, 0].reshape(sh, sw).astype(np.float32)
+            my = src[:, 1].reshape(sh, sw).astype(np.float32)
+            if s < 1.0:
+                mx = cv2.resize(mx, (w, h), interpolation=cv2.INTER_LINEAR)
+                my = cv2.resize(my, (w, h), interpolation=cv2.INTER_LINEAR)
+            return mx, my
+
+        map_xa, map_ya = _make_maps(src_a)
+        map_xb, map_yb = _make_maps(src_b)
+
+        warped_a = cv2.remap(img_a, map_xa, map_ya,
+                             cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        warped_b = cv2.remap(img_b, map_xb, map_yb,
+                             cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        frame = cv2.addWeighted(warped_a, 1.0 - t, warped_b, t, 0.0)
+        frames.append(frame)
+
+    if ping_pong:
+        frames = frames + frames[-2:0:-1]
+    return frames
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Optikai folyam morph
+# ════════════════════════════════════════════════════════════════════════════
+
 def generate_morph_frames_flow(
     img_a:      np.ndarray,
     img_b:      np.ndarray,
@@ -1960,6 +2085,7 @@ class ExportTab(QWidget):
         self._combo_method = QComboBox()
         self._combo_method.addItems([
             "Delaunay háromszög",
+            "TPS spline",
             "Optikai folyam",
             "Homográfia",
         ])
@@ -1967,6 +2093,7 @@ class ExportTab(QWidget):
             cfg("export.defaults.method", "Delaunay háromszög"))
         self._combo_method.setToolTip(
             "Delaunay háromszög: klasszikus face-morph, legjobb minőség (pontpár kell)\n"
+            "TPS spline: sima globális deformáció, nincs háromszög-határ (pontpár kell)\n"
             "Optikai folyam: dense flow alapú, organikus mozgás (pontpár nélkül is)\n"
             "Homográfia: perspektíva-interpoláció, gyors (homográfia mátrix kell)"
         )
@@ -1985,7 +2112,38 @@ class ExportTab(QWidget):
         fl_tri.addRow("Pontpárok:", self._lbl_tri_info)
         self._method_stack.addWidget(pan_tri)
 
-        # Panel 1 – Optikai folyam
+        # Panel 1 – TPS spline
+        pan_tps = QWidget()
+        fl_tps  = QFormLayout(pan_tps)
+        fl_tps.setContentsMargins(0, 4, 0, 0)
+
+        self._lbl_tps_info = QLabel("–")
+        self._lbl_tps_info.setStyleSheet("color:#7bc; font-size:11px;")
+        self._lbl_tps_info.setWordWrap(True)
+        fl_tps.addRow(tr("Pontpárok:"), self._lbl_tps_info)
+
+        self._spin_tps_smoothing = QDoubleSpinBox()
+        self._spin_tps_smoothing.setRange(0.0, 100.0)
+        self._spin_tps_smoothing.setSingleStep(0.5)
+        self._spin_tps_smoothing.setDecimals(1)
+        self._spin_tps_smoothing.setValue(0.0)
+        self._spin_tps_smoothing.setToolTip(
+            "0.0 = egzakt interpoláció (átmegy minden kontrollponton)\n"
+            ">0  = simítás: outlier-pontok hatása csökken, de az illesztés lazább.\n"
+            "Ajánlott: 0.0–2.0 az első próbákhoz.")
+        fl_tps.addRow(tr("Simítás:"), self._spin_tps_smoothing)
+
+        self._combo_tps_scale = QComboBox()
+        self._combo_tps_scale.addItems([tr("Teljes (lassabb)"), tr("Fél (gyorsabb)"), tr("Negyed (leggyorsabb)")])
+        self._combo_tps_scale.setCurrentText(tr("Fél (gyorsabb)"))
+        self._combo_tps_scale.setToolTip(
+            "A remap-térkép számítási felbontása.\n"
+            "Fél felbontáson ~4× gyorsabb, alig észrevehető minőségveszteséggel.\n"
+            "Nagyon finom részletekhez (textúra, kis pontok) érdemes Teljes-t választani.")
+        fl_tps.addRow(tr("Felbontás:"), self._combo_tps_scale)
+        self._method_stack.addWidget(pan_tps)
+
+        # Panel 2 – Optikai folyam
         pan_flow = QWidget()
         fl_flow = QFormLayout(pan_flow)
         fl_flow.setContentsMargins(0, 4, 0, 0)
@@ -2022,6 +2180,8 @@ class ExportTab(QWidget):
             self._method_stack.setCurrentIndex)
         self._combo_method.currentIndexChanged.connect(self._mark_stale)
         self._combo_flow_quality.currentIndexChanged.connect(self._mark_stale)
+        self._spin_tps_smoothing.valueChanged.connect(self._mark_stale)
+        self._combo_tps_scale.currentIndexChanged.connect(self._mark_stale)
         cfg_row.addWidget(grp_method)
 
         # ── Easing + ping-pong ────────────────────────────────────────────────
@@ -2172,16 +2332,20 @@ class ExportTab(QWidget):
         self._pts_a = pts_a or []
         self._pts_b = pts_b or []
 
-        # Info frissítése a Delaunay panelen
+        # Info frissítése a Delaunay és TPS paneleken
         n_pts = len(self._pts_a)
         if n_pts >= 3:
-            self._lbl_tri_info.setText(
-                f"{n_pts} pontpár elérhető  ✓")
+            self._lbl_tri_info.setText(f"{n_pts} pontpár elérhető  ✓")
             self._lbl_tri_info.setStyleSheet("color:#6c6; font-size:11px;")
         else:
-            self._lbl_tri_info.setText(
-                f"{n_pts} pontpár  (min. 3 szükséges)")
+            self._lbl_tri_info.setText(f"{n_pts} pontpár  (min. 3 szükséges)")
             self._lbl_tri_info.setStyleSheet("color:#c84; font-size:11px;")
+        if n_pts >= 4:
+            self._lbl_tps_info.setText(f"{n_pts} pontpár elérhető  ✓")
+            self._lbl_tps_info.setStyleSheet("color:#6c6; font-size:11px;")
+        else:
+            self._lbl_tps_info.setText(f"{n_pts} pontpár  (min. 4 szükséges)")
+            self._lbl_tps_info.setStyleSheet("color:#c84; font-size:11px;")
 
         # Módszer auto-kiválasztás
         if n_pts >= 3:
@@ -2256,6 +2420,25 @@ class ExportTab(QWidget):
                     self._pts_a, self._pts_b,
                     n_frames=n, easing=easing, ping_pong=pingpong)
                 method_short = "Delaunay"
+
+            elif method == "TPS spline":
+                if len(self._pts_a) < 4:
+                    raise ValueError(
+                        "TPS morphhoz legalább 4 pontpár szükséges!\n"
+                        "Adj hozzá anchor pontokat, vagy válassz más módszert.")
+                smoothing = self._spin_tps_smoothing.value()
+                scale_map = {
+                    tr("Teljes (lassabb)"):      1.0,
+                    tr("Fél (gyorsabb)"):        0.5,
+                    tr("Negyed (leggyorsabb)"): 0.25,
+                }
+                scale = scale_map.get(self._combo_tps_scale.currentText(), 0.5)
+                self._frames = generate_morph_frames_tps(
+                    self._img_a, self._img_b,
+                    self._pts_a, self._pts_b,
+                    n_frames=n, easing=easing, ping_pong=pingpong,
+                    smoothing=smoothing, scale=scale)
+                method_short = f"TPS (s={smoothing:.1f}, {int(scale*100)}%)"
 
             elif method == "Optikai folyam":
                 quality = self._combo_flow_quality.currentText()
