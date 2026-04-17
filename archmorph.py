@@ -2937,6 +2937,301 @@ class WorkflowPanel(QWidget):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
+#  Bal oldali navigációs panel
+# ════════════════════════════════════════════════════════════════════════════
+
+class _SideNavPanel(QWidget):
+    """
+    Függőleges navigációs sáv – 5 lépés gombokkal, sorrendben.
+    Aktív képernyő kiemelve; kész lépések zöld pipával.
+    """
+    screen_requested = pyqtSignal(int)
+
+    _STEPS = [
+        (0, "📂",  "Képek\nbetöltése"),
+        (1, "📍",  "Horgonypontok\nelhelyezése"),
+        (2, "⚡",  "Automatikus\npontkeresés"),
+        (3, "✏️",  "Kézi\nszerkesztés"),
+        (4, "🎬",  "Export"),
+    ]
+
+    _SS_NORMAL = (
+        "QPushButton{background:#16191f;color:#8a9ab0;border:none;"
+        "border-left:3px solid transparent;"
+        "padding:10px 6px;text-align:left;font-size:11px;line-height:1.4;}"
+        "QPushButton:hover{background:#1e2330;color:#c8d8e8;}"
+    )
+    _SS_ACTIVE = (
+        "QPushButton{background:#1e2a3a;color:#7bc8f0;border:none;"
+        "border-left:3px solid #4a9ed0;"
+        "padding:10px 6px;text-align:left;font-size:11px;font-weight:bold;line-height:1.4;}"
+    )
+    _SS_DONE = (
+        "QPushButton{background:#16191f;color:#3d7a52;border:none;"
+        "border-left:3px solid #2a5a38;"
+        "padding:10px 6px;text-align:left;font-size:11px;line-height:1.4;}"
+        "QPushButton:hover{background:#1a2420;color:#5aaa72;}"
+    )
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedWidth(148)
+        self.setStyleSheet("background:#111418;")
+        self._btns: dict = {}
+        self._done: set  = set()
+        self._active: int = 0
+        self._build()
+
+    def _build(self) -> None:
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Logó
+        logo = QLabel("Arch\nMorph")
+        logo.setStyleSheet(
+            "color:#4a9ed0;font-size:17px;font-weight:bold;"
+            "padding:14px 10px 10px 12px;")
+        logo.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(logo)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background:#2a3040;margin:0 8px;")
+        sep.setFixedHeight(1)
+        lay.addWidget(sep)
+        lay.addSpacing(6)
+
+        for idx, icon, label in self._STEPS:
+            btn = QPushButton(f"  {icon}  {label}")
+            btn.setStyleSheet(self._SS_NORMAL)
+            btn.setFixedHeight(52)
+            btn.setCheckable(False)
+            btn.clicked.connect(lambda _, i=idx: self.screen_requested.emit(i))
+            self._btns[idx] = btn
+            lay.addWidget(btn)
+
+        lay.addStretch()
+
+        # Verzió
+        ver = QLabel("v 0.6")
+        ver.setStyleSheet("color:#3a4a5a;font-size:10px;padding:6px 10px;")
+        lay.addWidget(ver)
+
+    def set_active(self, idx: int) -> None:
+        self._active = idx
+        self._refresh_styles()
+
+    def mark_done(self, idx: int, done: bool = True) -> None:
+        if done:
+            self._done.add(idx)
+        else:
+            self._done.discard(idx)
+        self._refresh_styles()
+
+    def _refresh_styles(self) -> None:
+        for idx, btn in self._btns.items():
+            icon, label = self._STEPS[idx][1], self._STEPS[idx][2]
+            if idx == self._active:
+                btn.setText(f"  {icon}  {label}")
+                btn.setStyleSheet(self._SS_ACTIVE)
+            elif idx in self._done:
+                btn.setText(f"  ✓  {label}")
+                btn.setStyleSheet(self._SS_DONE)
+            else:
+                btn.setText(f"  {icon}  {label}")
+                btn.setStyleSheet(self._SS_NORMAL)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Képek betöltése képernyő
+# ════════════════════════════════════════════════════════════════════════════
+
+class _ImageLoadScreen(QWidget):
+    """Első képernyő: A és B kép betöltése nagy gombokkal és előnézettel."""
+
+    load_a_requested  = pyqtSignal()
+    load_b_requested  = pyqtSignal()
+    load_ab_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._build()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(16)
+
+        title = QLabel(tr("Képek betöltése"))
+        title.setStyleSheet("color:#c8d8e8;font-size:16px;font-weight:bold;")
+        root.addWidget(title)
+
+        hint = QLabel(tr("Húzd ide a képfájlokat, vagy használd az alábbi gombokat.\n"
+                         "Ctrl+klikkel egyszerre jelölheted ki az A és B képet."))
+        hint.setStyleSheet("color:#6a8aaa;font-size:12px;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        # ── Gombok ────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self._btn_a = QPushButton(tr("📂  Kép A betöltése"))
+        self._btn_a.setFixedHeight(40)
+        self._btn_a.setStyleSheet(
+            "QPushButton{background:#1a3a5a;color:#7bc8f0;font-size:13px;"
+            "border-radius:5px;padding:0 16px;}"
+            "QPushButton:hover{background:#245880;}")
+        self._btn_a.clicked.connect(self.load_a_requested)
+
+        self._btn_b = QPushButton(tr("📂  Kép B betöltése"))
+        self._btn_b.setFixedHeight(40)
+        self._btn_b.setStyleSheet(
+            "QPushButton{background:#1a3a5a;color:#7bc8f0;font-size:13px;"
+            "border-radius:5px;padding:0 16px;}"
+            "QPushButton:hover{background:#245880;}")
+        self._btn_b.clicked.connect(self.load_b_requested)
+
+        self._btn_ab = QPushButton(tr("📂  Mindkét kép egyszerre…"))
+        self._btn_ab.setFixedHeight(40)
+        self._btn_ab.setStyleSheet(
+            "QPushButton{background:#1e4a2e;color:#6de89a;font-size:13px;"
+            "border-radius:5px;padding:0 16px;}"
+            "QPushButton:hover{background:#286038;}")
+        self._btn_ab.setToolTip(
+            tr("Ctrl+klikkel jelöld ki mindkét képet egyszerre.\n"
+               "Első fájl = Kép A  |  Második fájl = Kép B"))
+        self._btn_ab.clicked.connect(self.load_ab_requested)
+
+        btn_row.addWidget(self._btn_a)
+        btn_row.addWidget(self._btn_b)
+        btn_row.addWidget(self._btn_ab)
+        root.addLayout(btn_row)
+
+        # ── Előnézet – két kép egymás mellett ────────────────────────────
+        preview_row = QHBoxLayout()
+        preview_row.setSpacing(12)
+
+        self._lbl_a = self._make_preview(tr("Kép A"))
+        self._lbl_b = self._make_preview(tr("Kép B"))
+        preview_row.addWidget(self._lbl_a)
+        preview_row.addWidget(self._lbl_b)
+        root.addLayout(preview_row, stretch=1)
+
+        # ── Fájlnév-infó ─────────────────────────────────────────────────
+        info_row = QHBoxLayout()
+        self._info_a = QLabel("–")
+        self._info_b = QLabel("–")
+        for lbl in (self._info_a, self._info_b):
+            lbl.setStyleSheet("color:#5a7a9a;font-size:11px;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_row.addWidget(self._info_a)
+        info_row.addWidget(self._info_b)
+        root.addLayout(info_row)
+
+    def _make_preview(self, title: str) -> QLabel:
+        lbl = QLabel(title)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setMinimumHeight(200)
+        lbl.setStyleSheet(
+            "background:#1a1f28;color:#3a5a7a;border:1px solid #2a3a4a;"
+            "border-radius:4px;font-size:13px;")
+        lbl.setScaledContents(False)
+        return lbl
+
+    def update_image(self, side: str, img: Optional[np.ndarray],
+                     path: str = "") -> None:
+        """Frissíti az előnézeti képet és az infócímkét."""
+        lbl   = self._lbl_a  if side == "A" else self._lbl_b
+        info  = self._info_a if side == "A" else self._info_b
+
+        if img is None:
+            lbl.setPixmap(QPixmap())
+            lbl.setText(f"Kép {side}")
+            info.setText("–")
+            return
+
+        h, w = img.shape[:2]
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if cv2 else img
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        pm   = QPixmap.fromImage(qimg).scaled(
+            lbl.width() or 400, lbl.height() or 300,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        lbl.setPixmap(pm)
+        lbl.setText("")
+        fname = Path(path).name if path else ""
+        info.setText(f"{fname}  ({w}×{h})" if fname else f"{w}×{h}")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Horgonypontok (GCP) képernyő
+# ════════════════════════════════════════════════════════════════════════════
+
+class _GCPScreen(QWidget):
+    """Második képernyő: GCP igazítás indítása + eredmény-összesítő."""
+
+    gcp_open_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._build()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
+
+        title = QLabel(tr("Horgonypontok elhelyezése"))
+        title.setStyleSheet("color:#c8d8e8;font-size:16px;font-weight:bold;")
+        root.addWidget(title)
+
+        desc = QLabel(
+            tr("Jelölj meg 4–15 egyező pontot (épületsarkok, ablakkeretek,\n"
+               "utcajelzések) a két képen.\n\n"
+               "A program homográfiával igazítja az A képet a B perspektívájába.\n"
+               "Ez ERŐSEN JAVÍTJA az automatikus pontkeresés pontosságát."))
+        desc.setStyleSheet("color:#8a9ab0;font-size:12px;line-height:1.5;")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        self._btn_open = QPushButton(tr("📍  Horgonypontok elhelyezése…"))
+        self._btn_open.setFixedHeight(46)
+        self._btn_open.setStyleSheet(
+            "QPushButton{background:#2e7d32;color:#eee;font-size:14px;font-weight:bold;"
+            "border-radius:5px;padding:0 20px;}"
+            "QPushButton:hover{background:#388e3c;}"
+            "QPushButton:disabled{background:#1e3a22;color:#4a7a52;}")
+        self._btn_open.clicked.connect(self.gcp_open_requested)
+        root.addWidget(self._btn_open)
+
+        # Eredmény összesítő
+        self._lbl_result = QLabel(tr("GCP igazítás még nem futott."))
+        self._lbl_result.setStyleSheet(
+            "color:#5a7a6a;font-size:12px;padding:12px;"
+            "background:#151a18;border-radius:4px;border:1px solid #2a3a30;")
+        self._lbl_result.setWordWrap(True)
+        root.addWidget(self._lbl_result)
+
+        root.addStretch()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._btn_open.setEnabled(enabled)
+
+    def set_result(self, text: str, ok: bool = True) -> None:
+        color = "#3d7a52" if ok else "#c84"
+        self._lbl_result.setStyleSheet(
+            f"color:{color};font-size:12px;padding:12px;"
+            "background:#151a18;border-radius:4px;border:1px solid #2a3a30;")
+        self._lbl_result.setText(text)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  Főablak
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -2962,7 +3257,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_toolbar()
         self._build_menu()
-        self._build_workflow_dock()
         self._apply_dark_theme()
 
         # ── Témaerkesztő (pipetta üzemmód) ────────────────────────────────
@@ -2990,43 +3284,86 @@ class MainWindow(QMainWindow):
     # ── UI felépítése ────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
-
+        # ── Tartalom-widgetek (a régi fül-tartalom megmarad) ─────────────────
         self.auto_tab    = AutomaticModeTab(self.settings, self.project)
         self.editor_tab  = AdvancedEditorTab(self.settings, self.project)
         self.preview_tab = PreviewTab(self.settings)
         self.export_tab  = ExportTab()
 
+        # ── Új képernyők ──────────────────────────────────────────────────────
+        self.image_load_screen = _ImageLoadScreen()
+        self.gcp_screen        = _GCPScreen()
+
+        # ── Bal navigációs sáv ───────────────────────────────────────────────
+        self.nav_panel = _SideNavPanel()
+        self.nav_panel.screen_requested.connect(self._switch_screen)
+
+        # ── QStackedWidget: 5 képernyő ───────────────────────────────────────
+        # 0 = Képek betöltése   (_ImageLoadScreen)
+        # 1 = Horgonypontok     (_GCPScreen)
+        # 2 = Auto pontkeresés  (AutomaticModeTab)
+        # 3 = Kézi szerkesztő   (AdvancedEditorTab)
+        # 4 = Export            (ExportTab)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.image_load_screen)  # 0
+        self.stack.addWidget(self.gcp_screen)          # 1
+        self.stack.addWidget(self.auto_tab)            # 2
+        self.stack.addWidget(self.editor_tab)          # 3
+        self.stack.addWidget(self.export_tab)          # 4
+        self.stack.addWidget(self.preview_tab)         # 5 (nincs nav gomb, háttérben él)
+
+        # ── Fő elrendezés: nav | stack ───────────────────────────────────────
+        central = QWidget()
+        h_lay = QHBoxLayout(central)
+        h_lay.setContentsMargins(0, 0, 0, 0)
+        h_lay.setSpacing(0)
+        h_lay.addWidget(self.nav_panel)
+        h_lay.addWidget(self.stack, stretch=1)
+        self.setCentralWidget(central)
+
+        # Induláskor az első képernyőn vagyunk
+        self.stack.setCurrentIndex(0)
+        self.nav_panel.set_active(0)
+
+        # ── Jelek összekapcsolása ─────────────────────────────────────────────
+        # Képbetöltő képernyő gombok
+        self.image_load_screen.load_a_requested.connect(
+            lambda: self.load_image("A"))
+        self.image_load_screen.load_b_requested.connect(
+            lambda: self.load_image("B"))
+        self.image_load_screen.load_ab_requested.connect(
+            lambda: self.load_image(""))
+
+        # GCP képernyő gomb
+        self.gcp_screen.gcp_open_requested.connect(self._open_gcp_alignment)
+
+        # Auto illesztés
         self.auto_tab.request_auto_match.connect(self.run_auto_match)
+
+        # Kézi szerkesztő keresési jelek
         self.editor_tab.point_editor.roi_search_requested.connect(
             self.run_roi_match)
         self.editor_tab.point_editor.dual_roi_search_requested.connect(
             self.run_dual_roi_match)
         self.editor_tab.point_editor.mask_search_requested.connect(
             self.run_mask_match)
-        # kép drag & drop a canvasokon → betöltés
+
+        # Kép drag & drop a canvasokon → betöltés
         self.editor_tab.point_editor.image_a_drop_requested.connect(
             lambda p: self._load_image_from_path(p, "A"))
         self.editor_tab.point_editor.image_b_drop_requested.connect(
             lambda p: self._load_image_from_path(p, "B"))
 
-        # Tab-ok a munkafolyamat sorrendjében:
-        #   ③ Pont szerkesztő  →  ④ Automata illesztés  →  ⑤ Előnézet  →  ⑥ Export
-        self.tabs.addTab(self.editor_tab,  tr("✏️  Szerkesztő"))
-        self.tabs.addTab(self.auto_tab,    tr("⚡  Illesztés"))
-        self.tabs.addTab(self.preview_tab, tr("🔍  Előnézet"))
-        self.tabs.addTab(self.export_tab,  tr("🎬  Export"))
-
-        if _HAS_CONFIG_EDITOR:
-            self.settings_tab = ConfigEditorTab(self)
-            self.tabs.addTab(self.settings_tab, tr("⚙  Beállítások"))
-
-        # Fülváltáskor automatikus mentés (csak ha van ismert projektfájl)
-        self.tabs.currentChanged.connect(self._autosave)
+        # Stack váltáskor automatikus mentés (csak ha van ismert projektfájl)
+        self.stack.currentChanged.connect(self._autosave)
 
         # Pontok/vonalak változásakor dirty jelzés
         self.editor_tab.point_editor.points_changed.connect(self._mark_dirty)
+
+    def _switch_screen(self, idx: int) -> None:
+        """Navigáló sávgombra válasz: képernyő váltása + aktív gomb frissítése."""
+        self.stack.setCurrentIndex(idx)
+        self.nav_panel.set_active(idx)
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
@@ -3139,55 +3476,32 @@ class MainWindow(QMainWindow):
                   file=sys.stderr, flush=True)
 
     def _update_workflow_state(self) -> None:
-        """Frissíti a munkafolyamat-panel állapotát a projekt aktuális státusza alapján."""
-        if not hasattr(self, "_workflow_panel"):
+        """Frissíti a bal navigátor kész-jelzéseit a projekt aktuális státusza alapján."""
+        if not hasattr(self, "nav_panel"):
             return
         p = self.project
-        has_a = p.image_a is not None
-        has_b = p.image_b is not None
+        has_a   = p.image_a is not None
+        has_b   = p.image_b is not None
         has_pts = len(p.anchor_points_a) > 0
 
-        # Kézi szerkesztés: GCP után válik aktívvá (False = elvégzendő),
-        # kész ha van legalább 1 kézzel letett pont.
-        # Ha GCP még nem volt, marad opcionális (None).
-        edit_state: Optional[bool]
-        if not p.gcp_done:
-            edit_state = None       # GCP előtt: opcionális (halványan jelenik meg)
-        elif has_pts:
-            edit_state = True       # Van már pont → kész
-        else:
-            edit_state = False      # GCP kész, de még nincs pont → elvégzendő
+        # 0 – Képek betöltése: kész, ha mindkét kép be van töltve
+        self.nav_panel.mark_done(0, has_a and has_b)
+        # 1 – Horgonypontok: kész, ha GCP futott
+        self.nav_panel.mark_done(1, p.gcp_done)
+        # 2 – Automatikus keresés: kész, ha volt auto illesztés
+        self.nav_panel.mark_done(2, p.auto_match_done)
+        # 3 – Kézi szerkesztő: kész, ha van legalább egy pont
+        self.nav_panel.mark_done(3, has_pts)
+        # 4 – Export: csak az exportálás után lesz kész (egyelőre: ha van pont + auto)
+        self.nav_panel.mark_done(4, has_pts and p.auto_match_done)
 
-        state = {
-            "load_a":     has_a,
-            "load_b":     has_b,
-            "tilt":       None,           # mindig opcionális
-            "gcp":        p.gcp_done,
-            "edit":       edit_state,
-            "auto_match": p.auto_match_done,
-            "preview":    has_pts and p.auto_match_done,
-            "export":     has_pts and p.auto_match_done,
-        }
-        self._workflow_panel.refresh(state)
+        # GCP képernyő gomb letiltása, ha nincs mindkét kép
+        if hasattr(self, "gcp_screen"):
+            self.gcp_screen.set_enabled(has_a and has_b)
 
-    def _on_workflow_next(self, step_id: str) -> None:
-        """A 'Következő lépés' gombra reagálva navigál/indít."""
-        if step_id == "load_a":
-            self.load_image("A")
-        elif step_id == "load_b":
-            self.load_image("B")
-        elif step_id == "tilt":
-            # Opcionális – ha mégis ide kerülünk, A képet ajánljuk
-            self._correct_tilt("a")
-        elif step_id == "gcp":
-            self._open_gcp_alignment()
-        elif step_id == "edit":
-            self.tabs.setCurrentIndex(0)   # Pontszerkesztő tab
-        elif step_id == "auto_match":
-            self.tabs.setCurrentIndex(1)   # Automata illesztés tab
-        elif step_id in ("preview", "export"):
-            idx = {"preview": 2, "export": 3}.get(step_id, 0)
-            self.tabs.setCurrentIndex(idx)
+        # GCP eredmény frissítése
+        if hasattr(self, "gcp_screen") and p.gcp_done:
+            self.gcp_screen.set_result(tr("GCP igazítás elvégezve ✓"), ok=True)
 
     # ── Drag & drop (főablak) ────────────────────────────────────────────────
 
@@ -3936,6 +4250,10 @@ class MainWindow(QMainWindow):
         self.editor_tab.refresh_views()
         self._update_title()
         self._update_workflow_state()
+        # Képbetöltő képernyő előnézeteinek törlése
+        if hasattr(self, "image_load_screen"):
+            self.image_load_screen.update_image("A", None)
+            self.image_load_screen.update_image("B", None)
         self.statusBar().showMessage(tr("Üres projekt."))
 
     # ── Új projekt ────────────────────────────────────────────────────────────
@@ -3945,7 +4263,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         self._reset_project_state()
-        self.tabs.setCurrentIndex(0)
+        self._switch_screen(0)   # Képek betöltése képernyőre
 
     # ── Projekt átnevezése / info szerkesztése ────────────────────────────────
 
@@ -4021,9 +4339,9 @@ class MainWindow(QMainWindow):
         self.editor_tab.load_images()
         self._update_title()
         self._update_workflow_state()
-        # Ha mindkét kép betöltve → ugrás a pontszerkesztőre
-        if self.project.image_a is not None and self.project.image_b is not None:
-            self.tabs.setCurrentIndex(0)
+        # Képbetöltő képernyő előnézetének frissítése
+        if hasattr(self, "image_load_screen"):
+            self.image_load_screen.update_image(slot, img, path)
         self.statusBar().showMessage(
             tr("Kép ") + f"{slot} " + tr("betöltve: ") + f"{Path(path).name}  "
             f"({img.shape[1]}×{img.shape[0]} px)"
@@ -4130,7 +4448,7 @@ class MainWindow(QMainWindow):
                 )
 
             self.editor_tab.refresh_views()
-            self.tabs.setCurrentIndex(0)   # Pontszerkesztő – azonnal látszanak az új pontok
+            self._switch_screen(3)         # Pontszerkesztő – azonnal látszanak az új pontok
             self.project.auto_match_done = True
             self._update_workflow_state()
             n = len(self.project.anchor_points_a)
@@ -4631,7 +4949,17 @@ class MainWindow(QMainWindow):
             self.editor_tab.refresh_views()
             self._update_title()
             self._update_workflow_state()
-            self.tabs.setCurrentIndex(0)   # Pontszerkesztő
+            # Képbetöltő képernyő előnézeteinek frissítése
+            if hasattr(self, "image_load_screen"):
+                if self.project.image_a is not None:
+                    self.image_load_screen.update_image(
+                        "A", self.project.image_a,
+                        str(self.project.image_a_path or ""))
+                if self.project.image_b is not None:
+                    self.image_load_screen.update_image(
+                        "B", self.project.image_b,
+                        str(self.project.image_b_path or ""))
+            self._switch_screen(3)         # Pontszerkesztő
             self.statusBar().showMessage(
                 tr("Projekt betöltve: ") + f"{Path(path).name}  "
                 f"({len(self.project.anchor_points_a)} " + tr("pontpár)"))
