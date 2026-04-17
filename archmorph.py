@@ -4342,6 +4342,9 @@ class MainWindow(QMainWindow):
         # Képbetöltő képernyő előnézetének frissítése
         if hasattr(self, "image_load_screen"):
             self.image_load_screen.update_image(slot, img, path)
+        # Ha mindkét kép betöltve → ugrás a kézi szerkesztőre
+        if self.project.image_a is not None and self.project.image_b is not None:
+            self._switch_screen(3)
         self.statusBar().showMessage(
             tr("Kép ") + f"{slot} " + tr("betöltve: ") + f"{Path(path).name}  "
             f"({img.shape[1]}×{img.shape[0]} px)"
