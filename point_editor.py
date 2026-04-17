@@ -156,6 +156,9 @@ class PointEditorCanvas(QWidget):
     # Keresési maszk jelzések
     smask_draw_finished          = pyqtSignal(list)   # norm. koordináták, sokszög lezárásakor
     smask_poly_changed           = pyqtSignal(list)   # minden változáskor (gomb enable/disable)
+    # Vonal- és körív-eszköz jelzések
+    line_segment_defined         = pyqtSignal(float, float, float, float)          # x1,y1,x2,y2
+    arc_segment_defined          = pyqtSignal(float, float, float, float, float, float)  # x1y1,x2y2,x3y3
 
     _IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
     _ZOOM_MIN  = 0.5
@@ -243,6 +246,18 @@ class PointEditorCanvas(QWidget):
         self._smask_draw_cursor: Optional[Tuple[float, float]] = None # egér poz. rajzolás közben
         self._smask_drag_idx:    int                         = -1     # húzott csúcs indexe
         self._smask_mode:        bool                        = False  # maszk mód aktív
+
+        # ── Vonal-eszköz (egyenes → 10 egyenlő szegmens) ────────────────────
+        self._line_mode:  bool                        = False
+        self._line_pt1:   Optional[Tuple[float,float]] = None  # képkoord (px)
+
+        # ── Körív-eszköz (3 klikk → ív → 10 szegmens) ───────────────────────
+        self._arc_mode:  bool                         = False
+        self._arc_pt1:   Optional[Tuple[float,float]] = None   # képkoord
+        self._arc_pt2:   Optional[Tuple[float,float]] = None   # képkoord
+
+        # Egér aktuális képkoordinátája alakzat-előnézethez
+        self._shape_mouse_img: Optional[Tuple[float,float]] = None
 
         # ── Vonallánc előnézet (a Widget állítja be) ─────────────────────────
         self._preview_polyline:    Optional[List[Tuple[float, float]]] = None
@@ -355,6 +370,35 @@ class PointEditorCanvas(QWidget):
             self.smask_draw_finished.emit(list(self._smask_poly))
             self.smask_poly_changed.emit(list(self._smask_poly))
             self.update()
+
+    # ── Vonal- és körív-eszköz API ───────────────────────────────────────────
+
+    def set_line_mode(self, active: bool) -> None:
+        """Egyenes-eszköz mód be/ki. Kilépéskor a félkész állapot törlődik."""
+        self._line_mode = active
+        if not active:
+            self._line_pt1        = None
+            self._shape_mouse_img = None
+        self.update()
+
+    def set_arc_mode(self, active: bool) -> None:
+        """Körív-eszköz mód be/ki. Kilépéskor a félkész állapot törlődik."""
+        self._arc_mode = active
+        if not active:
+            self._arc_pt1         = None
+            self._arc_pt2         = None
+            self._shape_mouse_img = None
+        self.update()
+
+    def _cancel_shape_modes(self) -> None:
+        """Mindkét alakzat-mód állapotát visszaállítja (Esc, új mód megnyitása stb.)"""
+        self._line_pt1        = None
+        self._arc_pt1         = None
+        self._arc_pt2         = None
+        self._shape_mouse_img = None
+        self.update()
+
+    # ────────────────────────────────────────────────────────────────────────
 
     def _hit_test_poly_vertex(self, wx: float, wy: float) -> Tuple[int, int]:
         """
@@ -505,6 +549,43 @@ class PointEditorCanvas(QWidget):
         wx  = float(event.position().x())
         wy  = float(event.position().y())
         btn = event.button()
+
+        # ── Vonal-eszköz ─────────────────────────────────────────────────────
+        if self._line_mode and btn == Qt.MouseButton.LeftButton:
+            ic = self._w2i(wx, wy)
+            if ic is not None:
+                if self._line_pt1 is None:
+                    self._line_pt1 = ic
+                    self.update()
+                else:
+                    x1, y1 = self._line_pt1
+                    x2, y2 = float(ic[0]), float(ic[1])
+                    self._line_pt1        = None
+                    self._shape_mouse_img = None
+                    self.update()
+                    self.line_segment_defined.emit(x1, y1, x2, y2)
+            return
+
+        # ── Körív-eszköz ──────────────────────────────────────────────────────
+        if self._arc_mode and btn == Qt.MouseButton.LeftButton:
+            ic = self._w2i(wx, wy)
+            if ic is not None:
+                if self._arc_pt1 is None:
+                    self._arc_pt1 = ic
+                    self.update()
+                elif self._arc_pt2 is None:
+                    self._arc_pt2 = ic
+                    self.update()
+                else:
+                    x1, y1 = self._arc_pt1
+                    x2, y2 = self._arc_pt2
+                    x3, y3 = float(ic[0]), float(ic[1])
+                    self._arc_pt1         = None
+                    self._arc_pt2         = None
+                    self._shape_mouse_img = None
+                    self.update()
+                    self.arc_segment_defined.emit(x1, y1, x2, y2, x3, y3)
+            return
 
         # ── Maszk mód ────────────────────────────────────────────────────────
         if self._smask_mode:
@@ -728,6 +809,12 @@ class PointEditorCanvas(QWidget):
                     self._smask_draw_cursor = (ic[0] / iw, ic[1] / ih)
                     self.update()
             return
+
+        # ── Vonal/körív előnézet egér-pozíció ────────────────────────────────
+        if self._line_mode or self._arc_mode:
+            ic = self._w2i(wx, wy)
+            self._shape_mouse_img = tuple(ic) if ic is not None else None
+            self.update()
 
         # Sokszög preview, vonallánc preview cursor-vonal → újrarajzolás
         if self._poly_mode or (self._preview_polyline and self._preview_cursor_line):
@@ -1031,7 +1118,16 @@ class PointEditorCanvas(QWidget):
 
         elif key == Qt.Key.Key_Escape:
             self.escape_pressed.emit()
-            if self._poly_mode:
+            if self._line_mode and self._line_pt1 is not None:
+                self._line_pt1        = None
+                self._shape_mouse_img = None
+                self.update()
+            elif self._arc_mode and (self._arc_pt1 is not None or self._arc_pt2 is not None):
+                self._arc_pt1         = None
+                self._arc_pt2         = None
+                self._shape_mouse_img = None
+                self.update()
+            elif self._poly_mode:
                 self._poly_mode    = False
                 self._poly_pts     = []
                 self._display_poly = []
@@ -1454,6 +1550,109 @@ class PointEditorCanvas(QWidget):
                     lbl = "MASZK (rajzolás…)" if self._smask_drawing else "MASZK"
                     painter.drawText(int(cx) - 30, int(cy), lbl)
 
+        # ── Vonal-eszköz előnézet ─────────────────────────────────────────────
+        if self._line_mode and self._img_size is not None:
+            _C_LINE_TOOL = QColor("#FFB300")
+            if self._line_pt1 is not None:
+                pw1 = self._i2w(*self._line_pt1)
+                if pw1:
+                    # Rögzített első pont
+                    painter.setPen(QPen(_C_LINE_TOOL, 2))
+                    painter.setBrush(QBrush(_C_LINE_TOOL))
+                    painter.drawEllipse(int(pw1[0]) - 5, int(pw1[1]) - 5, 10, 10)
+                    # Szaggatott előnézet-vonal az egérig
+                    if self._shape_mouse_img:
+                        pw2 = self._i2w(*self._shape_mouse_img)
+                        if pw2:
+                            painter.setPen(QPen(_C_LINE_TOOL, 1, Qt.PenStyle.DashLine))
+                            painter.drawLine(int(pw1[0]), int(pw1[1]),
+                                             int(pw2[0]), int(pw2[1]))
+                # Státusz szöveg
+                painter.setPen(QPen(_C_LINE_TOOL, 1))
+                fnt = QFont(); fnt.setPointSize(9); painter.setFont(fnt)
+                step = "Klikk: végpont megjelölése" if self._line_pt1 else "Klikk: kezdőpont"
+                painter.drawText(6, self.height() - 8,
+                    f"📏 Egyenes  |  {step}  |  Esc: mégse")
+            else:
+                painter.setPen(QPen(_C_LINE_TOOL, 1))
+                fnt = QFont(); fnt.setPointSize(9); painter.setFont(fnt)
+                painter.drawText(6, self.height() - 8,
+                    "📏 Egyenes  |  Klikk: kezdőpont megjelölése  |  Esc: mégse")
+
+        # ── Körív-eszköz előnézet ─────────────────────────────────────────────
+        if self._arc_mode and self._img_size is not None:
+            _C_ARC_TOOL = QColor("#4af")
+            if self._arc_pt1 is not None:
+                pw1 = self._i2w(*self._arc_pt1)
+                if pw1:
+                    painter.setPen(QPen(_C_ARC_TOOL, 2))
+                    painter.setBrush(QBrush(_C_ARC_TOOL))
+                    painter.drawEllipse(int(pw1[0]) - 5, int(pw1[1]) - 5, 10, 10)
+            if self._arc_pt2 is not None:
+                pw2 = self._i2w(*self._arc_pt2)
+                if pw2:
+                    painter.setPen(QPen(_C_ARC_TOOL, 2))
+                    painter.setBrush(QBrush(_C_ARC_TOOL))
+                    painter.drawEllipse(int(pw2[0]) - 5, int(pw2[1]) - 5, 10, 10)
+                # Ív előnézet az egér pozíciójával mint 3. pont
+                if self._arc_pt1 and self._shape_mouse_img:
+                    pw1 = self._i2w(*self._arc_pt1)
+                    pw3 = self._i2w(*self._shape_mouse_img)
+                    if pw1 and pw2 and pw3:
+                        try:
+                            import math as _m
+                            # Körívet közelítjük Bezier-görbével (gyors előnézet)
+                            x1,y1 = self._arc_pt1; x2,y2 = self._arc_pt2
+                            x3,y3 = self._shape_mouse_img
+                            D = 2*(x1*(y2-y3)+x2*(y3-y1)+x3*(y1-y2))
+                            if abs(D) > 1e-6:
+                                ux=((x1**2+y1**2)*(y2-y3)+(x2**2+y2**2)*(y3-y1)+(x3**2+y3**2)*(y1-y2))/D
+                                uy=((x1**2+y1**2)*(x3-x2)+(x2**2+y2**2)*(x1-x3)+(x3**2+y3**2)*(x2-x1))/D
+                                r=_m.hypot(x1-ux,y1-uy)
+                                t1=_m.atan2(y1-uy,x1-ux); t2=_m.atan2(y2-uy,x2-ux)
+                                t3=_m.atan2(y3-uy,x3-ux)
+                                def _norm(a): return a%(2*_m.pi)
+                                t1n,t2n,t3n=_norm(t1),_norm(t2),_norm(t3)
+                                ccw=(_norm(t3n-t1n)<_norm(t2n-t1n))
+                                if ccw:
+                                    span=_norm(t2n-t1n) or 2*_m.pi
+                                    pts_prev=[(ux+r*_m.cos(t1+i/20*span),uy+r*_m.sin(t1+i/20*span)) for i in range(21)]
+                                else:
+                                    span=_norm(t1n-t2n) or 2*_m.pi
+                                    pts_prev=[(ux+r*_m.cos(t1-i/20*span),uy+r*_m.sin(t1-i/20*span)) for i in range(21)]
+                                prev_w=[self._i2w(px,py) for px,py in pts_prev]
+                                pen_arc=QPen(_C_ARC_TOOL,1,Qt.PenStyle.DashLine)
+                                painter.setPen(pen_arc)
+                                painter.setBrush(Qt.BrushStyle.NoBrush)
+                                for ki in range(len(prev_w)-1):
+                                    if prev_w[ki] and prev_w[ki+1]:
+                                        ax,ay=prev_w[ki]; bx,by=prev_w[ki+1]
+                                        painter.drawLine(int(ax),int(ay),int(bx),int(by))
+                        except Exception:
+                            pass
+                        # Egér jelölése
+                        painter.setPen(QPen(QColor("#aaa"), 1, Qt.PenStyle.DotLine))
+                        painter.drawLine(int(pw2[0]),int(pw2[1]),int(pw3[0]),int(pw3[1]))
+                        painter.setPen(QPen(_C_ARC_TOOL, 1))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawEllipse(int(pw3[0])-4, int(pw3[1])-4, 8, 8)
+            elif self._arc_pt1 is not None and self._shape_mouse_img:
+                pw1 = self._i2w(*self._arc_pt1)
+                pw_m = self._i2w(*self._shape_mouse_img)
+                if pw1 and pw_m:
+                    painter.setPen(QPen(_C_ARC_TOOL, 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(int(pw1[0]),int(pw1[1]),int(pw_m[0]),int(pw_m[1]))
+            # Státusz szöveg
+            painter.setPen(QPen(_C_ARC_TOOL, 1))
+            fnt = QFont(); fnt.setPointSize(9); painter.setFont(fnt)
+            if self._arc_pt1 is None:
+                msg = "⌒ Körív  |  Klikk: kezdőpont  |  Esc: mégse"
+            elif self._arc_pt2 is None:
+                msg = "⌒ Körív  |  Klikk: végpont  |  Esc: mégse"
+            else:
+                msg = "⌒ Körív  |  Klikk: ív egy pontja  |  Esc: mégse"
+            painter.drawText(6, self.height() - 8, msg)
+
         # ── Alosztály-réteg (pl. GCPCanvas overlay) ──────────────────────────
         self._paint_overlay(painter)
         painter.end()
@@ -1612,6 +1811,36 @@ class PointEditorWidget(QWidget):
         )
         self.btn_smask_search.clicked.connect(self._on_smask_search)
 
+        # ── Vonal- és körív-eszköz gombok ────────────────────────────────────
+        _SS_SHAPE = (
+            "QPushButton{background:#2a2a3a;color:#aaa;padding:0 10px;"
+            "border-radius:4px;font-size:12px;border:1px solid #444;}"
+            "QPushButton:checked{background:#2a1a4a;color:#b0a0ff;border:1px solid #6a50d0;}"
+            "QPushButton:hover{background:#343448;}"
+        )
+        self.btn_line = QPushButton(tr("📏  Egyenes"))
+        self.btn_line.setCheckable(True)
+        self.btn_line.setFixedHeight(28)
+        self.btn_line.setToolTip(
+            tr("Egyenes rajzolása és feldarabolása\n"
+               "1. klikk: kezdőpont\n"
+               "2. klikk: végpont\n"
+               "→ 11 egyenlő pontot helyez el és párosítja a másik képpel"))
+        self.btn_line.setStyleSheet(_SS_SHAPE)
+        self.btn_line.toggled.connect(self._on_line_mode_toggled)
+
+        self.btn_arc = QPushButton(tr("⌒  Körív"))
+        self.btn_arc.setCheckable(True)
+        self.btn_arc.setFixedHeight(28)
+        self.btn_arc.setToolTip(
+            tr("Körív rajzolása és feldarabolása\n"
+               "1. klikk: ív kezdőpontja\n"
+               "2. klikk: ív végpontja\n"
+               "3. klikk: az ív egy közbülső pontja (görbület meghatározásához)\n"
+               "→ 11 egyenlő pontot helyez el az ív mentén"))
+        self.btn_arc.setStyleSheet(_SS_SHAPE)
+        self.btn_arc.toggled.connect(self._on_arc_mode_toggled)
+
         self.lbl_hint = QLabel(
             tr("Klikk: pont  |  2× klikk: vonallánc start/vég  |  "
                "Húzás: kijelölés  |  Ctrl+húzás: ROI  |  Delete: törlés  |  Görgetés: zoom")
@@ -1633,6 +1862,9 @@ class PointEditorWidget(QWidget):
         bar.addWidget(self.btn_smask)
         bar.addWidget(self.btn_smask_clear)
         bar.addWidget(self.btn_smask_search)
+        bar.addSpacing(8)
+        bar.addWidget(self.btn_line)
+        bar.addWidget(self.btn_arc)
         bar.addSpacing(8)
         bar.addWidget(self.lbl_hint)
         bar.addSpacing(8)
@@ -1712,6 +1944,16 @@ class PointEditorWidget(QWidget):
         self.canvas_b.smask_draw_finished.connect(self._on_smask_b_finished)
         self.canvas_a.smask_poly_changed.connect(lambda _: self._update_smask_buttons())
         self.canvas_b.smask_poly_changed.connect(lambda _: self._update_smask_buttons())
+
+        # Vonal- és körív-eszköz: canvas jelei → pontok generálása
+        self.canvas_a.line_segment_defined.connect(
+            lambda x1, y1, x2, y2: self._on_line_defined("A", x1, y1, x2, y2))
+        self.canvas_b.line_segment_defined.connect(
+            lambda x1, y1, x2, y2: self._on_line_defined("B", x1, y1, x2, y2))
+        self.canvas_a.arc_segment_defined.connect(
+            lambda x1,y1,x2,y2,x3,y3: self._on_arc_defined("A",x1,y1,x2,y2,x3,y3))
+        self.canvas_b.arc_segment_defined.connect(
+            lambda x1,y1,x2,y2,x3,y3: self._on_arc_defined("B",x1,y1,x2,y2,x3,y3))
 
     # ── Publikus API ─────────────────────────────────────────────────────────
 
@@ -2185,6 +2427,134 @@ class PointEditorWidget(QWidget):
         pa = list(self.canvas_a._smask_poly) if len(self.canvas_a._smask_poly) >= 3 else None
         pb = list(self.canvas_b._smask_poly) if len(self.canvas_b._smask_poly) >= 3 else None
         return pa, pb
+
+    # ── Vonal- és körív-eszköz ───────────────────────────────────────────────
+
+    def _on_line_mode_toggled(self, checked: bool) -> None:
+        """Egyenes-eszköz gomb kapcsolva."""
+        if checked:
+            # Többi mód kikapcsolása
+            self.btn_arc.setChecked(False)
+            self.btn_smask.setChecked(False)
+            self.lbl_status.setText(tr("📏 Egyenes  |  Klikk: kezdőpont megjelölése"))
+        else:
+            self.lbl_status.setText("")
+        self.canvas_a.set_line_mode(checked)
+        self.canvas_b.set_line_mode(checked)
+
+    def _on_arc_mode_toggled(self, checked: bool) -> None:
+        """Körív-eszköz gomb kapcsolva."""
+        if checked:
+            self.btn_line.setChecked(False)
+            self.btn_smask.setChecked(False)
+            self.lbl_status.setText(tr("⌒ Körív  |  Klikk: ív kezdőpontja"))
+        else:
+            self.lbl_status.setText("")
+        self.canvas_a.set_arc_mode(checked)
+        self.canvas_b.set_arc_mode(checked)
+
+    def _on_line_defined(self, side: str, x1: float, y1: float,
+                         x2: float, y2: float, n: int = 10) -> None:
+        """Egyenes kész (2 klikk) → n+1 egyenlő pontra osztja fel → horgonypontok."""
+        coords = [
+            (x1 + i / n * (x2 - x1), y1 + i / n * (y2 - y1))
+            for i in range(n + 1)
+        ]
+        added = self._add_points_batch(side, coords)
+        self.btn_line.setChecked(False)
+        self.lbl_status.setText(
+            tr(f"📏 Egyenes kész  –  {added} pont hozzáadva"))
+
+    def _on_arc_defined(self, side: str,
+                        x1: float, y1: float, x2: float, y2: float,
+                        x3: float, y3: float, n: int = 10) -> None:
+        """Körív kész (3 klikk) → n+1 pontra osztja fel → horgonypontok."""
+        coords = self._compute_arc_points(x1, y1, x2, y2, x3, y3, n)
+        added = self._add_points_batch(side, coords)
+        self.btn_arc.setChecked(False)
+        self.lbl_status.setText(
+            tr(f"⌒ Körív kész  –  {added} pont hozzáadva"))
+
+    @staticmethod
+    def _compute_arc_points(x1: float, y1: float,
+                             x2: float, y2: float,
+                             x3: float, y3: float,
+                             n: int = 10) -> List[Tuple[float, float]]:
+        """
+        Körív P1→P2 mentén, P3 egy közbülső pontja (meghatározza a görbe irányát).
+        Visszaad n+1 egyenlő szögtávolságú pontot az ív mentén.
+        Ha a 3 pont kollineáris, a körív helyett egyenest oszt fel.
+        """
+        D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+        if abs(D) < 1e-8:
+            # Kollineáris → visszaesés egyenesre
+            return [(x1 + i / n * (x2 - x1), y1 + i / n * (y2 - y1))
+                    for i in range(n + 1)]
+
+        ux = ((x1**2 + y1**2) * (y2 - y3) +
+              (x2**2 + y2**2) * (y3 - y1) +
+              (x3**2 + y3**2) * (y1 - y2)) / D
+        uy = ((x1**2 + y1**2) * (x3 - x2) +
+              (x2**2 + y2**2) * (x1 - x3) +
+              (x3**2 + y3**2) * (x2 - x1)) / D
+        r = math.hypot(x1 - ux, y1 - uy)
+
+        t1 = math.atan2(y1 - uy, x1 - ux)  # szög P1-hez
+        t2 = math.atan2(y2 - uy, x2 - ux)  # szög P2-höz
+        t3 = math.atan2(y3 - uy, x3 - ux)  # szög P3-hoz (közbülső)
+
+        def _norm(a: float) -> float:
+            return a % (2 * math.pi)
+
+        t1n, t2n, t3n = _norm(t1), _norm(t2), _norm(t3)
+
+        # P1 → P3 → P2 haladunk-e az óramutató járásával ellentétesen?
+        a13 = _norm(t3n - t1n)
+        a12 = _norm(t2n - t1n)
+        ccw = a13 < a12  # P3 hamarabb van CCW úton P2 előtt → CCW ív
+
+        if ccw:
+            span = _norm(t2n - t1n) or (2 * math.pi)
+            return [(ux + r * math.cos(t1 + i / n * span),
+                     uy + r * math.sin(t1 + i / n * span))
+                    for i in range(n + 1)]
+        else:
+            span = _norm(t1n - t2n) or (2 * math.pi)
+            return [(ux + r * math.cos(t1 - i / n * span),
+                     uy + r * math.sin(t1 - i / n * span))
+                    for i in range(n + 1)]
+
+    def _add_points_batch(self, side: str,
+                          coords: List[Tuple[float, float]]) -> int:
+        """
+        Több pont hozzáadása egyszerre (egy visszavonási lépés).
+        Minden pont párját a meglévő horgonypontokból interpolálja.
+        Visszatér a ténylegesen hozzáadott pontok számával.
+        """
+        self._push_undo()
+        added = 0
+        for x, y in coords:
+            pts_src = (self.project.anchor_points_a if side == "A"
+                       else self.project.anchor_points_b)
+            pts_dst = (self.project.anchor_points_b if side == "A"
+                       else self.project.anchor_points_a)
+            try:
+                partner = self._interpolate_partner(x, y,
+                                                    list(pts_src),
+                                                    list(pts_dst))
+            except ValueError:
+                continue
+            if side == "A":
+                self.project.anchor_points_a.append([x, y])
+                self.project.anchor_points_b.append(list(partner))
+            else:
+                self.project.anchor_points_b.append([x, y])
+                self.project.anchor_points_a.append(list(partner))
+            added += 1
+        if added:
+            self._sync()
+            self.points_changed.emit()
+        return added
 
     def _on_dual_roi_search(self) -> None:
         roi_a = self.canvas_a.get_roi_image()
