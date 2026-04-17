@@ -844,9 +844,20 @@ def generate_morph_frames_triangle(
 
     h, w = img_b.shape[:2]
 
-    # Pontok int-té konvertálva + határpontok hozzáadva
-    pa = [(int(round(x)), int(round(y))) for x, y in pts_a]
-    pb = [(int(round(x)), int(round(y))) for x, y in pts_b]
+    # Pontok int-té konvertálva – képen kívüli pontpárok kiszűrve
+    _BORDER = 2   # ennyi pixeles tűrés a képhatáron kívül
+    pa_raw = [(int(round(x)), int(round(y))) for x, y in pts_a]
+    pb_raw = [(int(round(x)), int(round(y))) for x, y in pts_b]
+    pa, pb = [], []
+    for a, b in zip(pa_raw, pb_raw):
+        if (-_BORDER <= a[0] <= w + _BORDER and -_BORDER <= a[1] <= h + _BORDER and
+                -_BORDER <= b[0] <= w + _BORDER and -_BORDER <= b[1] <= h + _BORDER):
+            pa.append(a)
+            pb.append(b)
+    if len(pa) < 3:
+        raise ValueError(
+            "Delaunay morphhoz legalább 3 képen belüli pontpár szükséges!\n"
+            "Néhány pont a képhatáron kívülre esett és ki lett szűrve.")
     pa, pb = _add_boundary_points(w, h, pa, pb)
 
     # Átlagpozíciók → erre számítjuk a Delaunay-t
@@ -857,10 +868,9 @@ def generate_morph_frames_triangle(
     # A téglalapot 2 pixellel bővítjük minden irányban, hogy a kerekítés
     # és határpont-eltolás miatt kívülre eső pontok ne okozzanak
     # cv::Subdiv2D::locate hibát (-211: out of range).
-    _M = 2
+    _M = 20   # nagyobb margó: maszk-keresés után lehetnek határ-közeli pontok
     subdiv = cv2.Subdiv2D((-_M, -_M, w + _M, h + _M))
     for p in pm:
-        # Pontokat is szorítjuk a kiterjesztett tartományba (biztonság kedvéért)
         px = float(max(-_M + 1, min(w + _M - 1, p[0])))
         py = float(max(-_M + 1, min(h + _M - 1, p[1])))
         subdiv.insert((px, py))
